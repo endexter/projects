@@ -1,0 +1,608 @@
+---
+title: "Fraud Profiling"
+subtitle: "MVP"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 4
+params:
+  date: !r format(Sys.Date(), "%B %d, %Y")
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+  warning = FALSE,
+  cache = FALSE,
+  dpi = 200,
+  out.width = "100%",
+  out.height ="100%",
+  fig.align = "center")
+
+options(xtable.comment = FALSE)
+```
+
+
+**`r params$date`**
+
+
+# Set Up
+
+```{r}
+library(ggplot2)
+library(xtable)
+library(scales)
+```
+
+### Query
+```{r, eval = TRUE, echo = TRUE}
+
+df <- web_db("select
+  a.user_id,
+  --f.user_email,
+  a.is_charged_off,
+  a.chargeoff_reason,
+  a.total_amount_charged_off,
+  a.hard_loss_charge_off,
+  a.fees_charged_off,
+  a.application_created_datetime,
+  --a.funding_bank_account_id,
+  --a.funding_amount,
+  a.inception_date,
+  --a.depository_id,
+  --d.balance_date,
+  --f.lead_source,
+  --f.utm_source,
+  --f.utm_content,
+  --f.initial_product_selected,
+  f.utm_campaign,
+  f.utm_medium,
+  f.utm_source_clean,
+  f.utm_channel_type,
+  f.utm_channel_grouping,
+  coalesce(f.utm_channel_grouping, 'Unattributed') as marketing_channel_group,
+  f.is_signed_up,
+  f.first_account_type,
+  f.total_accounts_opened,
+  d.balance_date as negative_bal_date,
+  h.termination_date,
+  d.balance_date::date - a.inception_date::date as days_to_negative_bal,
+  h.termination_date::date - a.inception_date::date as days_to_termination,
+  case when d.balance_date is null then 0::boolean else 1::boolean end neg_balance_ever,
+  case when f.utm_source in ('ph', 'fb', 'adwords', 'atez', 'dailykos', 'nw1', 
+      'inboxdollars', 'instagram') then f.utm_source
+    when f.utm_source in ('facebook', 'fb-unbounced', 'facebook.com') then 'fb'
+    when f.utm_source is null then 'none'
+    else 'utm_other' end marketing_channel,
+  case when a.chargeoff_reason is null then 'Not Fraud'
+    when a.chargeoff_reason in ('ATM Dep Chargeback', 'Bank by Mail / In Person',
+      'Mobile Dep Chargeback', 'Early Detected Fraud',
+      'Opening Dep Chargeback', 'Other') then 
+          'ATM Chargeback/Early Detected/Mobile Dep Chargeback/Other'
+    else a.chargeoff_reason end fraud_type
+from public.dt_accounts a
+left join (
+    with neg_bal as (
+    select *,
+      max(current_balance) over (order by 
+        balance_date rows between 2 preceding and current row) as max_balance
+    from public.depository_balance
+    where current_balance < 0
+    order by balance_date
+  )
+  select depository_id, min(balance_date) - integer '3' as balance_date
+  from neg_bal
+  where max_balance < 0
+  group by 1
+    ) d on a.unique_account_id = concat('d',d.depository_id)
+left join public.dt_users f on a.user_id = f.user_id
+left join public.dt_fraud_users_with_info h on f.external_user_id = h.external_user_id
+where f.total_accounts_opened > 0
+and a.account_type = 'Summit'
+and f.first_account_type = 'Summit'
+order by a.user_id;")
+
+df <- data.table(df)
+
+```
+
+### Helper functions
+
+```{r}
+round0 <- function(x) format(round(x,0), nsmall = 0)
+round2 <- function(x) format(round(x, 2), nsmall = 2)
+percent_round2 <- function(x) paste0(round2(100*x), "%")
+make_money <- function(x) paste("$",format(round(x, 2), nsmall = 2, big.mark=","),sep="")
+my_colors <- c("#1165bf", "#119fbf", "#37bf72", "#f2ac16", "#d94514", "#b6babf")
+
+```
+
+## Fraud/Charge-off Definitions
+
+* **NSF Behavior:** *Non-Sufficient Funds or overdrafts often related to debit preauthorizations or debit hold issues.*
+* **Mobile Deposit Chargeback:** *Mobile deposit returned by issuing bank, often leading to overdrawn accounts when customers spend the provisional credits.*
+* **External Transfer Chargeback** *Customers spending provisionally credited funds transferred into their account before the funds are returned to the sending bank.*
+* **Opening Deposit Chargeback** *Deposit used to open account is returned to issuing bank.*
+* **ATM Deposit Chargeback** *Spending provisionally credited funds from an ATM deposit prior to the funds being returned to the issuing bank.*
+* **Bank by Mail/In OPerson** *Spending provisionary funds from a bank or in person deposit before funds are returned to the issuing institution.*
+* **Other**
+
+# Total Volume
+
+```{r, results='asis', echo = FALSE}
+# Get month and date for termination, inception, and negative balance dates
+df[, ":=" (
+	termination_month = as.Date(cut(df$termination_date,
+		breaks = "month")),
+	termination_week = as.Date(cut(df$termination_date,
+		breaks = "week",
+		start.on.monday = FALSE)),
+	inception_month = as.Date(cut(df$inception_date,
+		breaks = "month")),
+	inception_week = as.Date(cut(df$inception_date,
+		breaks = "week",
+		start.on.monday = FALSE)),
+	negative_month = as.Date(cut(df$negative_bal_date,
+		breaks = "month")),
+	negative_week = as.Date(cut(df$negative_bal_date,
+		breaks = "week",
+		start.on.monday = FALSE)))]
+
+
+df2 <- df[is_charged_off == TRUE]
+nrow <- nrow(df2)
+
+print(xtable(df[is_charged_off == TRUE, 
+  .(count = .N, 
+    total_loss = make_money(sum(total_amount_charged_off)), 
+	  hard_loss = make_money(sum(hard_loss_charge_off)),
+    fees = make_money(sum(fees_charged_off)))],
+      floating=FALSE, caption = "Overall count and cost of fraud (to date)."), include.rownames=FALSE, caption.placement = "top")
+
+```
+
+```{r, results='asis', echo = FALSE}
+
+df2 <- df[is_charged_off == TRUE]
+nrow <- nrow(df2)
+
+df_count <- df2[, .(count = .N, rate = percent_round2(.N/nrow)), 
+                      by = chargeoff_reason]
+
+print(xtable(df_count,
+             floating=FALSE, caption = "Total counts by charge-off category"),
+      include.rownames=FALSE, caption.placement = "top")
+
+```
+
+```{r, echo = FALSE}
+max_count <- df_count[which.max(count)]
+```
+
+The most common type of charge-off is `r max_count[, chargeoff_reason]`, which accounts for `r max_count[, rate]` of all charge-off types. 
+
+## Volume Trends (Monthly)
+
+Counts by account going negative
+```{r, echo=FALSE}
+
+df3 <- df2[, .(count = .N), 
+	by = .(negative_month, negative_week)]
+
+p <- ggplot(data = df3,
+  aes(x=negative_month, y=count)) +
+  stat_summary(fun.y = sum,
+    geom = "bar", fill = my_colors[1]) +
+  scale_x_date(
+    labels = date_format("%b %Y"),
+    date_breaks = "2 month") + 
+  labs( x = "Negative Account Date (Month)",
+        y = "Count") 
+    
+p + ggtitle("Monthly Fraud Counts by Negative Account Date") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
+    	legend.title=element_blank())
+```
+
+```{r, echo=FALSE}
+
+df3 <- df2[, .(count = .N), 
+	by = .(termination_month, termination_week)]
+
+p <- ggplot(data = df3,
+  aes(termination_month, count)) +
+  stat_summary(fun.y = sum,
+    geom = "bar", fill = my_colors[1]) +
+  scale_x_date(
+    labels = date_format("%b %Y"),
+    date_breaks = "2 month") + 
+  labs( x = "Charge-off/Termination Date (Month)",
+        y = "Count") 
+    
+p + ggtitle("Monthly Fraud Counts by Charge-off Date") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
+    	legend.title=element_blank())
+```
+
+```{r, echo=FALSE}
+
+df3 <- df2[, .(count = .N), 
+	by = .(inception_month, inception_week)]
+
+p <- ggplot(data = df3,
+  aes(inception_month, count)) +
+  stat_summary(fun.y = sum, 
+    geom = "bar", fill = my_colors[1]) + 
+  scale_x_date(
+    labels = date_format("%b %Y"),
+    date_breaks = "2 month") + 
+  labs( x = "Account Inception Date (Month)",
+        y = "Count") 
+    
+p + ggtitle("Monthly Fraud Counts by Inception Date") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
+    	legend.title=element_blank())
+```
+
+
+
+
+
+```{r, fig.height = 10, fig.width=7, echo=FALSE, eval=FALSE}
+
+df_trends <- df2[, .(count = .N), by = .(inception_month, chargeoff_reason)]
+
+hp <- ggplot(df_trends, aes(x= count)) +
+	geom_histogram(binwidth = 20) +
+    ggtitle("Counts of Fraud") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    	plot.title = element_text(hjust = 0.5)) +
+    	facet_wrap( ~ chargeoff_reason, scales="free_y", ncol = 2)
+	
+hp
+
+```
+
+
+
+```{r, fig.height = 10, fig.width=7, echo=FALSE, eval=FALSE}
+
+
+
+hp <- ggplot(m, aes(x= marketing_type, y = rate, fill = customer_type)) +
+	geom_bar(stat="identity", position=position_dodge()) +
+  scale_y_continuous(limits = c(0,1)) +
+    labs(title = "Paid Media by Customer Type", caption = "",
+         x = "Paid Media Type", y = "Proportion") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    	plot.title = element_text(hjust = 0.5))
+
+hp + aes(fill = customer_type) + scale_fill_manual(values = my_colors[1:2])
+
+```
+
+# Cost of Fraud
+
+```{r, results='asis', echo = FALSE}
+
+var = "total_amount_charged_off"
+
+print(xtable(df2[, .(sum = make_money(sum(get(var))),
+	percent = percent_round2(sum(get(var))/df2[, sum(get(var))]),
+	mean = make_money(mean(get(var))),
+	min = make_money(min(get(var))),
+	q25 = make_money(quantile(get(var), .25)),
+	q50 = make_money(quantile(get(var), .50)),
+	q75 = make_money(quantile(get(var), .75)),
+	max = max(make_money(max(get(var))))),
+	by = chargeoff_reason],
+	floating=FALSE, caption = "Total charged-off losses (principal + realized)"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
+```
+
+```{r, results='asis', echo = FALSE}
+
+var = "hard_loss_charge_off"
+
+print(xtable(df2[, .(sum = make_money(sum(get(var))),
+	percent = percent_round2(sum(get(var))/df2[, sum(get(var))]),
+	mean = make_money(mean(get(var))),
+	min = make_money(min(get(var))),
+	q25 = make_money(quantile(get(var), .25)),
+	q50 = make_money(quantile(get(var), .50)),
+	q75 = make_money(quantile(get(var), .75)),
+	max = max(make_money(max(get(var))))),
+	by = chargeoff_reason], 
+	floating=FALSE, caption = "Total charged-off losses (realized only)"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
+
+```
+
+
+
+
+## Loss Trends (Monthly)
+
+```{r, echo=FALSE}
+
+df2 <- df[is_charged_off == TRUE]
+
+df3 <- df2[, .(hard_loss = sum(hard_loss_charge_off), lost_fees = sum(fees_charged_off)), 
+	by = .(negative_month, negative_week)]
+
+df4 <- melt(df3, id.vars = c("negative_month", "negative_week"),
+	measurment_vars = c("hard_loss", "fees_lost"))
+
+p <- ggplot(data = df4,
+  aes(negative_month, value, fill=variable)) +
+  stat_summary(fun.y = sum, 
+    geom = "bar") + 
+  scale_x_date(
+    labels = date_format("%b %Y"),
+    date_breaks = "2 month") +
+  scale_y_continuous(limits = c(0,200000)) +
+  scale_fill_manual(values = my_colors[c(1,3)]) + 
+  labs( x = "Negative Account Date (Month)",
+        y = "Sum of Charge-off Loss ($)") 
+    
+p + ggtitle("Monthly Fraud Loss by Negative Account Balance Date") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
+    	legend.title=element_blank())
+
+```
+
+```{r, echo=FALSE}
+
+df2 <- df[is_charged_off == TRUE]
+
+df3 <- df2[, .(hard_loss = sum(hard_loss_charge_off), lost_fees = sum(fees_charged_off)), 
+	by = .(termination_month, termination_week)]
+
+df4 <- melt(df3, id.vars = c("termination_month", "termination_week"),
+	measurment_vars = c("hard_loss", "fees_lost"))
+
+p <- ggplot(data = df4,
+  aes(termination_month, value, fill=variable)) +
+  stat_summary(fun.y = sum, 
+    geom = "bar") + 
+  scale_x_date(
+    labels = date_format("%b %Y"),
+    date_breaks = "2 month") +
+  scale_y_continuous(limits = c(0,200000)) +
+  scale_fill_manual(values = my_colors[c(1,3)])  + 
+  labs( x = "Charge-off/Termination Date (Month)",
+        y = "Sum of Charge-off Loss ($)") 
+    
+p + ggtitle("Monthly Fraud Loss by Charge-off Date") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
+    	legend.title=element_blank())
+
+```
+
+
+
+
+```{r, echo=FALSE}
+
+df2 <- df[is_charged_off == TRUE]
+
+# Just Realized
+df3 <- df2[, .(hard_loss = sum(hard_loss_charge_off), 
+               lost_fees = sum(fees_charged_off)), 
+	by = .(inception_month, inception_week)]
+
+df4 <- melt(df3, id.vars = c("inception_month", "inception_week"),
+	measurment_vars = c("hard_loss", "fees_lost"))
+
+p <- ggplot(data = df4,
+  aes(inception_month, value, fill=variable)) +
+  stat_summary(fun.y = sum, 
+    geom = "bar") + 
+  scale_x_date(
+    labels = date_format("%b %Y"),
+    date_breaks = "2 month") +
+  scale_y_continuous(limits = c(0,200000)) +
+  scale_fill_manual(values = my_colors[c(1,3)])  + 
+  labs( x = "Account Inception Date (Month)",
+        y = "Sum of Charge-off Loss ($)") 
+    
+p + ggtitle("Monthly Fraud Loss by Inception Date") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
+    	legend.title=element_blank())
+
+```
+
+
+## Cost by charge-off type
+
+```{r, fig.height = 10, fig.width=7, echo=FALSE, message = FALSE, warning = FALSE, error = FALSE}
+
+df2 <- df[is_charged_off == TRUE]
+
+# Just Realized
+df3 <- df2[!(chargeoff_reason %in% c("Bank by Mail / In Person",
+            "Other", "Opening Dep Chargeback")),
+           .(hard_loss = sum(hard_loss_charge_off), 
+               lost_fees = sum(fees_charged_off)), 
+	by = .(negative_month, negative_week, chargeoff_reason)]
+
+df4 <- melt(df3, id.vars = c("negative_month", "negative_week", "chargeoff_reason"),
+	measurment_vars = c("hard_loss", "fees_lost"))
+
+p <- ggplot(data = df4,
+  aes(negative_month, value, fill=variable)) +
+  stat_summary(fun.y = sum, 
+    geom = "bar") + 
+  scale_x_date(
+    labels = date_format("%b %Y"),
+    date_breaks = "2 month") +
+  scale_fill_manual(values = my_colors[c(1,3)]) +
+  facet_wrap( ~ chargeoff_reason, #scales="free_y", 
+              ncol = 1) +
+  labs( x = "Month Accounts Went Negative",
+        y = "Charge-off Cost (dollars)",
+        caption = "Note: Bank by Mail / In Person, Opening Dep Chargeback, and Other charge-off reasons remove due to low counts.") +
+    scale_fill_manual(values = my_colors[1:4])
+    
+p + ggtitle("Monthly Fraud Loss by Negative Account Date") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.9),
+    	legend.title=element_blank())
+
+```
+
+
+
+
+
+# Time Till Fraud/Charge-off Act
+
+Time between account creation and first day an account goes negative and stays negative for at least three days in a row.
+
+```{r, results='asis', echo=FALSE}
+
+var = "days_to_negative_bal"
+
+print(xtable(df2[!is.na(get(var)), .(mean = round2(mean(get(var), na.rm = TRUE)),
+	min = round0(min(get(var), na.rm=TRUE)),
+	q25 = round2(quantile(get(var), .25)),
+	q50 = round2(quantile(get(var), .50)),
+	q75 = round2(quantile(get(var), .75)),
+	max = round0(max(get(var)))), by = chargeoff_reason], 
+	  floating=TRUE, caption = "Days from account creation to negative balance"), 
+	include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
+```
+
+```{r, fig.height = 7, fig.width=7, echo=FALSE}
+hp <- ggplot(df2[!(chargeoff_reason %in% c("Bank by Mail / In Person",
+            "Other", "Opening Dep Chargeback"))], aes(x= days_to_negative_bal)) +
+	geom_histogram(binwidth = 20) +
+    labs(title = "Time to Negative Balance", caption = "Note: Bank by Mail / In Person, Opening Dep Chargeback, and Other charge-off reasons remove due to low counts.") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    	plot.title = element_text(hjust = 0.5)) +
+  facet_wrap( ~ chargeoff_reason, scales="free_y", ncol = 2)
+	
+hp + aes(fill = chargeoff_reason) + scale_fill_manual(values = my_colors[1:4]) +
+  theme(legend.position="none")
+
+```
+
+
+
+```{r, echo=FALSE}
+
+p <- ggplot(df2[!(chargeoff_reason %in% c("Bank by Mail / In Person",
+            "Other", "Opening Dep Chargeback"))], aes(x=days_to_negative_bal, fill = chargeoff_reason)) +
+        geom_density(position="identity", alpha=0.4, color=NA) +
+  labs(title = "Time to Negative Balance", caption = "Note: Bank by Mail / In Person, Opening Dep Chargeback, and Other charge-off reasons remove due to low counts.") +
+  scale_fill_manual(values = my_colors[1:4])
+p + theme(legend.title=element_blank(), legend.position=c(0.8,0.8))
+
+```
+
+
+# Marketing Channel
+
+```{r, results = 'asis', echo=FALSE}
+tbl <- with(df, table(is_charged_off, marketing_channel_group)  )
+ pct.tbl <- round(100*(prop.table(tbl, margin = 1)),2)
+ colnames(pct.tbl) <- paste("pct",colnames(pct.tbl), sep=".") 
+# The next line constructs an interleaving index to rearrange the columns
+results <- cbind(tbl, pct.tbl)[, c( matrix(1:(2*ncol(tbl)), nrow=2, byrow=TRUE) )]
+
+marketing <- data.frame( "Affiliates" = paste0(results[,"Affiliates"], " (", results[,"pct.Affiliates"], "%)"),
+  "Ignore" = paste0(results[,"Ignore"], " (", results[,"pct.Ignore"], "%)"),
+  "Organic" = paste0(results[,"Organic"], " (", results[,"pct.Organic"], "%)"),
+  "PaidMedia" = paste0(results[,"PaidMedia"], " (", results[,"pct.PaidMedia"], "%)"),
+  "Unattributed" = paste0(results[,"Unattributed"], " (", results[,"pct.Unattributed"], "%)"))
+
+rownames(marketing) <- c("customer", "fraud/charge-off")
+print(xtable(marketing, floating=TRUE, caption = "Maketing channel group by customer vs fraud/charge-off"), include.rownames=TRUE, scalebox='0.90', caption.placement = "top")
+
+```
+
+
+```{r, results = 'asis', echo=FALSE}
+# Remove the "Ignore" group from data set
+df0 <- df[marketing_channel_group != "Ignore"]
+
+tbl <- with(df0, table(chargeoff_reason, marketing_channel_group)  )
+ pct.tbl <- round(100*(prop.table(tbl, margin = 1)),2)
+ colnames(pct.tbl) <- paste("pct",colnames(pct.tbl), sep=".") 
+# The next line constructs an interleaving index to rearrange the columns
+results <- cbind(tbl, pct.tbl)[, c( matrix(1:(2*ncol(tbl)), nrow=2, byrow=TRUE) )]
+
+chargeoff_marketing <- data.frame( 
+  "Affiliates" = paste0(results[,"Affiliates"], " (", results[,"pct.Affiliates"], "%)"),
+  #"Ignore" = paste0(results[,"Ignore"], " (", results[,"pct.Ignore"], "%)"),
+  "Organic" = paste0(results[,"Organic"], " (", results[,"pct.Organic"], "%)"),
+  "PaidMedia" = paste0(results[,"PaidMedia"], " (", results[,"pct.PaidMedia"], "%)"),
+  "Unattributed" = paste0(results[,"Unattributed"], " (", results[,"pct.Unattributed"], "%)"))
+
+rownames(chargeoff_marketing) <- rownames(tbl)
+
+print(xtable(chargeoff_marketing, floating=TRUE, caption = "Marketing channel group by charged-off reason"), include.rownames=TRUE, scalebox='0.90', caption.placement = "top")
+```
+
+
+
+
+```{r, fig.height = 4, fig.width=5, echo = FALSE}
+
+df[, marketing_type := ifelse(is.na(utm_channel_type), "Unattributed", utm_channel_type)]
+x <- df[is_charged_off == TRUE & marketing_channel_group == "PaidMedia"][, 
+	.N, by = marketing_type][, rate := N/sum(N)][, customer_type := "customer"][]
+y <- df[is_charged_off == FALSE & marketing_channel_group == "PaidMedia"][,
+ .N, by = marketing_type][, rate := N/sum(N)][, customer_type := "fraud"][]
+
+
+m <- rbindlist(list(x,y))
+m <- m[marketing_type != "Ignore"]
+
+hp <- ggplot(m, aes(x= marketing_type, y = rate, fill = customer_type)) +
+	geom_bar(stat="identity", position=position_dodge()) +
+  scale_y_continuous(limits = c(0,1)) +
+    labs(title = "Paid Media by Customer Type", caption = "",
+         x = "Paid Media Type", y = "Proportion") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    	plot.title = element_text(hjust = 0.5), legend.position=c(0.8,0.8))
+
+hp + aes(fill = customer_type) + scale_fill_manual(values = my_colors[c(1,3)])
+```
+
+
+# TO DO
+
+
+- **Compare counts of fraud vs total accounts to see if rate of fraud is increasing or not**
+
+- **Charge-off per account incepted**
+
+- ~~**Cost by chargeoff reason in a stacked bar - fees vs hard loss by fraud loss type (facet_wrap?)**~~
+
+- ~~**Remove low counts from graphs and add footnote of their removal**~~
+
+- ~~**Switch from histograms to density plots**~~
+
+- **Look at edge cases, give some qualitative insight**
+
+- ~~**Ignore ignore from marketing tables**~~
+
+- ~~**Look at utm channel type to see what is causing the increase in PaidMedia**~~
+
+- **Break down also by browser (chrome, etc)**
+
+- **Distribution of accounts by states (counts of accounts vs fraud)**
+
+- **Profiling fraud vs non with account origination data**
+
+- ~~**Add monthly counts of attempted date (aka, negative balance).**~~
+
+- **Break down fraud ratio by chrageoff type**
+
+- **Look at chargeoff types that have min of $0**
+
+- **Remove low count of charge off groups**
