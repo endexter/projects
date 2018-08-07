@@ -25,16 +25,16 @@ options(xtable.comment = FALSE)
 **`r params$date`**
 
 
-# Set Up
 
-```{r}
+
+```{r, echo=FALSE}
 library(ggplot2)
 library(xtable)
 library(scales)
 ```
 
-### Query
-```{r, eval = TRUE, echo = TRUE}
+
+```{r, eval = TRUE, echo = FALSE}
 
 df <- web_db("select
   a.user_id,
@@ -105,9 +105,10 @@ df <- data.table(df)
 
 ```
 
-### Helper functions
 
-```{r}
+
+```{r, echo=FALSE}
+### Helper functions
 round0 <- function(x) format(round(x,0), nsmall = 0)
 round2 <- function(x) format(round(x, 2), nsmall = 2)
 percent_round2 <- function(x) paste0(round2(100*x), "%")
@@ -116,7 +117,7 @@ my_colors <- c("#1165bf", "#119fbf", "#37bf72", "#f2ac16", "#d94514", "#b6babf")
 
 ```
 
-## Fraud/Charge-off Definitions
+# Fraud/Charge-off Definitions
 
 * **NSF Behavior:** *Non-Sufficient Funds or overdrafts often related to debit preauthorizations or debit hold issues.*
 * **Mobile Deposit Chargeback:** *Mobile deposit returned by issuing bank, often leading to overdrawn accounts when customers spend the provisional credits.*
@@ -124,9 +125,11 @@ my_colors <- c("#1165bf", "#119fbf", "#37bf72", "#f2ac16", "#d94514", "#b6babf")
 * **Opening Deposit Chargeback** *Deposit used to open account is returned to issuing bank.*
 * **ATM Deposit Chargeback** *Spending provisionally credited funds from an ATM deposit prior to the funds being returned to the issuing bank.*
 * **Bank by Mail/In OPerson** *Spending provisionary funds from a bank or in person deposit before funds are returned to the issuing institution.*
-* **Other**
+* **Other** *All charge-off reasons that do not fit in the above categories.*
 
-# Total Volume
+*Note: For the purpose of this document, Opening Deposit Chargeback and Bank by Mail/In Person have been grouped in with Other in Other/Misc due to low cell counts.*
+
+# Overview
 
 ```{r, results='asis', echo = FALSE}
 # Get month and date for termination, inception, and negative balance dates
@@ -147,6 +150,14 @@ df[, ":=" (
 		breaks = "week",
 		start.on.monday = FALSE)))]
 
+# Group smaller groups together
+df[, chargeoff_reason := ifelse(is.na(chargeoff_reason), NA,
+	ifelse(chargeoff_reason %in% c("NSF Behavior", "Ext Tran Chargeback",
+		"Mobile Dep Chargeback", "ATM Dep Chargeback"), chargeoff_reason, "Other/Misc"))]
+
+# Get min and max dates for plotting
+min_date <- df[, min(inception_month)]
+max_date <- max(df[, max(termination_month, na.rm=TRUE)], df[, max(inception_month)])
 
 df2 <- df[is_charged_off == TRUE]
 nrow <- nrow(df2)
@@ -180,9 +191,17 @@ max_count <- df_count[which.max(count)]
 
 The most common type of charge-off is `r max_count[, chargeoff_reason]`, which accounts for `r max_count[, rate]` of all charge-off types. 
 
-## Volume Trends (Monthly)
+# Fraud Volume
 
-Counts by account going negative
+Four different methods of determining monthly fraud trends are presented below. They are calculated by the following:
+
+- **Negative Account Date:** The date at which an account becomes negative and stays negative for at least three consecutive days. This is in attempt to determine that date that the fradulant activity occured.
+- **Charge-off/Termination Date:** The date that an account was charged-off, normally corresponding with an account termination.
+- **Inception Date:** The date that the account was created.
+- **Fraud Rate:** The proportion of fraudulent accounts versus non-fradulent accounts, calculated by any of the above date definitions.
+
+## Monthly Counts
+
 ```{r, echo=FALSE}
 
 df3 <- df2[, .(count = .N), 
@@ -192,13 +211,14 @@ p <- ggplot(data = df3,
   aes(x=negative_month, y=count)) +
   stat_summary(fun.y = sum,
     geom = "bar", fill = my_colors[1]) +
-  scale_x_date(
+  scale_x_date(limits = c(min_date, max_date),
     labels = date_format("%b %Y"),
     date_breaks = "2 month") + 
   labs( x = "Negative Account Date (Month)",
-        y = "Count") 
+        y = "Count") +
+  scale_y_continuous(limits = c(0,500))
     
-p + ggtitle("Monthly Fraud Counts by Negative Account Date") +
+p + ggtitle("Fraud Volume by Negative Account Date") +
 	theme(axis.text.x = element_text(angle = 45, hjust = 1),
     	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
     	legend.title=element_blank())
@@ -213,17 +233,20 @@ p <- ggplot(data = df3,
   aes(termination_month, count)) +
   stat_summary(fun.y = sum,
     geom = "bar", fill = my_colors[1]) +
-  scale_x_date(
+  scale_x_date(limits = c(min_date, max_date),
     labels = date_format("%b %Y"),
     date_breaks = "2 month") + 
   labs( x = "Charge-off/Termination Date (Month)",
-        y = "Count") 
+        y = "Count") +
+  scale_y_continuous(limits = c(0,500))
     
-p + ggtitle("Monthly Fraud Counts by Charge-off Date") +
+p + ggtitle("Monthly Fraud Counts by Charge-off/Termination Date") +
 	theme(axis.text.x = element_text(angle = 45, hjust = 1),
     	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
     	legend.title=element_blank())
 ```
+
+The above graph shows the discrepancy between when an account commits the fraudulent activity versus when the account is actually closed and charged-off, especcially noticed by the sporadic spikes in termination date verus negative account date. Previously, much of the account maintance and fraud mitigation was performed by Radius.
 
 ```{r, echo=FALSE}
 
@@ -234,11 +257,12 @@ p <- ggplot(data = df3,
   aes(inception_month, count)) +
   stat_summary(fun.y = sum, 
     geom = "bar", fill = my_colors[1]) + 
-  scale_x_date(
+  scale_x_date(limits = c(min_date, max_date),
     labels = date_format("%b %Y"),
     date_breaks = "2 month") + 
   labs( x = "Account Inception Date (Month)",
-        y = "Count") 
+        y = "Count") +
+  scale_y_continuous(limits = c(0,500))
     
 p + ggtitle("Monthly Fraud Counts by Inception Date") +
 	theme(axis.text.x = element_text(angle = 45, hjust = 1),
@@ -246,44 +270,115 @@ p + ggtitle("Monthly Fraud Counts by Inception Date") +
     	legend.title=element_blank())
 ```
 
+There is a noticable dip in fraud based on account inception (origination). Further investigation into onboarding and/or marketing trends may shed further light, however comparing the rate of fradulent account originations verse total account originations (as in the following graph) indicates that there was actually a more steady decrease in the rate of fradulent account originations than the previous graph suggests (see figure bellow).
 
+## Monthly Fraud Rate
 
+```{r, echo = FALSE}
 
-
-```{r, fig.height = 10, fig.width=7, echo=FALSE, eval=FALSE}
-
-df_trends <- df2[, .(count = .N), by = .(inception_month, chargeoff_reason)]
-
-hp <- ggplot(df_trends, aes(x= count)) +
-	geom_histogram(binwidth = 20) +
-    ggtitle("Counts of Fraud") +
-	theme(axis.text.x = element_text(angle = 45, hjust = 1),
-    	plot.title = element_text(hjust = 0.5)) +
-    	facet_wrap( ~ chargeoff_reason, scales="free_y", ncol = 2)
+df[, ":=" (is_fraud = ifelse(is_charged_off == TRUE, 1, 0),
+	is_customer = ifelse(is_charged_off == FALSE, 1, 0))]
 	
-hp
+df_fraud <- df[, .(fraud_count = sum(is_fraud), customer_count = sum(is_customer)), 
+	by = inception_month][, 
+	.(fraud_rate = fraud_count/(fraud_count + customer_count)), by = inception_month]
+	
+ggplot(data = df_fraud, aes(x = inception_month, y = fraud_rate)) +
+	geom_bar(stat = "identity", fill = my_colors[1]) + 
+  scale_x_date(limits = c(min_date, max_date),
+    labels = date_format("%b %Y"),
+    date_breaks = "2 month") +
+  scale_y_continuous(limits = c(0,.1)) + 
+  labs(title = "Rate of Fraudulent Account Creation", y = "Number of Fraudulent Accounts/Total Accounts", x = "Account Inception Month") +
+  theme(legend.position="none", axis.text.x = element_text(angle = 45, hjust = 1))
 
+```
+
+Aside from February and March of 2016, the rate of fradulent accounts created has been going down when compared to total account originations. However, most (if not all) of the charge-off/fraud data labeling has been heavily relied on by Radius. Spot checking a number of account who went negative and never became postive has indicated that there may be upwards to an additional 30% of accounts that should have been charged-off or labeled as such, but currently have not been. This is likely due to the processes and procedures dictated by Radius.
+
+
+```{r, eval = FALSE, echo = FALSE}
+# Query to show charged-off negative accounts vs non-cahrged-off
+-- this may be it finally
+with all_results2 as (
+  with all_results as (
+    with t as (
+        select
+          db.depository_id,
+          min(db.id) as first_negative_id
+        from web_db.depository_balance db
+        where db.current_balance < 0
+        group by db.depository_id
+    )
+    select
+      t.*,
+      t2.current_balance,
+      t2.balance_date
+    from t
+      left join web_db.depository_balance t2 on t.first_negative_id = t2.id
+    where not exists(select *
+                     from web_db.depository_balance db3
+                     where
+                       db3.depository_id = t.depository_id
+                       and db3.id > t.first_negative_id
+                       and db3.current_balance > 0)
+  )
+  select
+    ar.*,
+    u.user_email,
+    u.is_fraud_or_chargeoff
+  from all_results ar
+    left join web_db.depository d on ar.depository_id = d.id
+    left join web_db.user_account ua on d.account_id = ua.account_id
+    left join bi.dt_users u on ua.user_id = u.user_id
+)
+  --select is_fraud_or_chargeoff, count(*)
+select is_fraud_or_chargeoff, count(*)
+from all_results2
+group by 1;
+
+```
+
+```{r, echo = FALSE, eval = FALSE}
+# Place holder for doing fraud rate by charge-off type
+# Note that most of the below code will need to be rewritten to format the data correctly
+df[, ":=" (is_fraud = ifelse(is_charged_off == TRUE, 1, 0),
+	is_customer = ifelse(is_charged_off == FALSE, 1, 0))]
+	
+df_fraud <- df[, .(fraud_count = sum(is_fraud), customer_count = sum(is_customer)), 
+	by = inception_month][, 
+	.(fraud_rate = fraud_count/(fraud_count + customer_count)), by = inception_month]
+	
+ggplot(data = df_fraud, aes(x = inception_month, y = fraud_rate)) +
+	geom_bar(stat = "identity", fill = my_colors[1]) +  
+  scale_x_date(limits = c(min_date, max_date),
+    labels = date_format("%b %Y"),
+    date_breaks = "2 month") +
+  scale_y_continuous(limits = c(0,.1)) + 
+  labs(title = "Rate of Fraudulent Account Creation", y = "Number of Fraudulent Accounts/Total Accounts", x = "Account Inception Month") +
+  theme(legend.position="none", axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r, echo = FALSE}
+max_cost <- df_count[which.max(count)]
 ```
 
 
 
-```{r, fig.height = 10, fig.width=7, echo=FALSE, eval=FALSE}
 
 
 
-hp <- ggplot(m, aes(x= marketing_type, y = rate, fill = customer_type)) +
-	geom_bar(stat="identity", position=position_dodge()) +
-  scale_y_continuous(limits = c(0,1)) +
-    labs(title = "Paid Media by Customer Type", caption = "",
-         x = "Paid Media Type", y = "Proportion") +
-	theme(axis.text.x = element_text(angle = 45, hjust = 1),
-    	plot.title = element_text(hjust = 0.5))
 
-hp + aes(fill = customer_type) + scale_fill_manual(values = my_colors[1:2])
 
-```
+
+
+
+
 
 # Cost of Fraud
+
+
 
 ```{r, results='asis', echo = FALSE}
 
@@ -319,9 +414,15 @@ print(xtable(df2[, .(sum = make_money(sum(get(var))),
 ```
 
 
+As displayed in the tables above, much of the total losses related to NSF Behavior are not actually realized. While NSF Behavior makes up the majority of volume of charge-offs, it is in fact, one of the least costly, especcially when compared to the cost of some of the other charge-off reasons as shown below.
 
 
-## Loss Trends (Monthly)
+## Monthly Cost
+
+- **Lost Fees:** Overdraft fees that Aspiration was owed, but never collected.
+- **Hard Loss:** Actual money lost.
+- **Total Cost:** Combined Lost Fees and Hard Loss
+
 
 ```{r, echo=FALSE}
 
@@ -337,7 +438,7 @@ p <- ggplot(data = df4,
   aes(negative_month, value, fill=variable)) +
   stat_summary(fun.y = sum, 
     geom = "bar") + 
-  scale_x_date(
+  scale_x_date(limits = c(min_date, max_date),
     labels = date_format("%b %Y"),
     date_breaks = "2 month") +
   scale_y_continuous(limits = c(0,200000)) +
@@ -366,7 +467,7 @@ p <- ggplot(data = df4,
   aes(termination_month, value, fill=variable)) +
   stat_summary(fun.y = sum, 
     geom = "bar") + 
-  scale_x_date(
+  scale_x_date(limits = c(min_date, max_date),
     labels = date_format("%b %Y"),
     date_breaks = "2 month") +
   scale_y_continuous(limits = c(0,200000)) +
@@ -400,7 +501,7 @@ p <- ggplot(data = df4,
   aes(inception_month, value, fill=variable)) +
   stat_summary(fun.y = sum, 
     geom = "bar") + 
-  scale_x_date(
+  scale_x_date(limits = c(min_date, max_date),
     labels = date_format("%b %Y"),
     date_breaks = "2 month") +
   scale_y_continuous(limits = c(0,200000)) +
@@ -416,7 +517,7 @@ p + ggtitle("Monthly Fraud Loss by Inception Date") +
 ```
 
 
-## Cost by charge-off type
+### Cost by charge-off type
 
 ```{r, fig.height = 10, fig.width=7, echo=FALSE, message = FALSE, warning = FALSE, error = FALSE}
 
@@ -436,7 +537,7 @@ p <- ggplot(data = df4,
   aes(negative_month, value, fill=variable)) +
   stat_summary(fun.y = sum, 
     geom = "bar") + 
-  scale_x_date(
+  scale_x_date(limits = c(min_date, max_date),
     labels = date_format("%b %Y"),
     date_breaks = "2 month") +
   scale_fill_manual(values = my_colors[c(1,3)]) +
@@ -453,6 +554,47 @@ p + ggtitle("Monthly Fraud Loss by Negative Account Date") +
     	legend.title=element_blank())
 
 ```
+
+
+### Account Severity
+
+Similar to ther Fraud Rate, Account Severity refers to rate of hard loss by number of accounts per the given charge-off reason.
+
+```{r, fig.height = 10, fig.width=7, echo=FALSE, message = FALSE, warning = FALSE, error = FALSE}
+
+df2 <- df[is_charged_off == TRUE]
+
+df3 <- df2[!(chargeoff_reason == "Other/Misc"),
+           .(hard_loss = sum(hard_loss_charge_off), 
+               lost_fees = sum(fees_charged_off),
+             total_loss = sum(total_amount_charged_off),
+             count = .N,
+             totalloss_over_count = sum(total_amount_charged_off)/.N,
+             hardloss_over_count = sum(hard_loss_charge_off)/.N), 
+	by = .(negative_month, chargeoff_reason)]
+	
+ggplot(data = df3, 
+	aes(x = negative_month, y = hardloss_over_count)) +
+	geom_bar(stat = "identity") + 
+  scale_x_date(limits = c(min_date, max_date),
+    labels = date_format("%b %Y"),
+    date_breaks = "2 month") + 
+	facet_wrap( ~ chargeoff_reason, ncol = 1) + 
+	aes(fill = chargeoff_reason) +
+	scale_fill_manual(values = my_colors[1:4]) +
+	theme(legend.position="none", axis.text.x = element_text(angle = 45, hjust = 1)) + 
+	labs(title = "Account Severity (Hard Loss)", caption = "",
+         x = "Negative Account Balance Date (Month)", 
+         y = "Rate of Hard Loss by Count of Negative Accounts",
+	     caption = "Note: Bank by Mail / In Person, Opening Dep Chargeback, and Other charge-off reasons remove due to low counts.") 
+
+```
+
+
+
+
+
+
 
 
 
@@ -476,14 +618,18 @@ print(xtable(df2[!is.na(get(var)), .(mean = round2(mean(get(var), na.rm = TRUE))
 	include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
 ```
 
+Both External Transfer Chargebacks and NSF Behavior has the larges volume as well as more accounts that have a longer time till committing fraud, though it seems mostly proportional to the other types of chargebacks, mostly differing in volume.
+
 ```{r, fig.height = 7, fig.width=7, echo=FALSE}
-hp <- ggplot(df2[!(chargeoff_reason %in% c("Bank by Mail / In Person",
-            "Other", "Opening Dep Chargeback"))], aes(x= days_to_negative_bal)) +
+hp <- ggplot(df2[!(chargeoff_reason == "Other/Misc")], 
+             aes(x= days_to_negative_bal)) +
 	geom_histogram(binwidth = 20) +
-    labs(title = "Time to Negative Balance", caption = "Note: Bank by Mail / In Person, Opening Dep Chargeback, and Other charge-off reasons remove due to low counts.") +
+    labs(title = "Time to Negative Balance", 
+         caption = "Note: Bank by Mail / In Person, Opening Dep Chargeback, and Other charge-off reasons remove due to low counts.") +
 	theme(axis.text.x = element_text(angle = 45, hjust = 1),
     	plot.title = element_text(hjust = 0.5)) +
-  facet_wrap( ~ chargeoff_reason, scales="free_y", ncol = 2)
+  facet_wrap( ~ chargeoff_reason, #scales="free_y", 
+              ncol = 2)
 	
 hp + aes(fill = chargeoff_reason) + scale_fill_manual(values = my_colors[1:4]) +
   theme(legend.position="none")
@@ -494,8 +640,8 @@ hp + aes(fill = chargeoff_reason) + scale_fill_manual(values = my_colors[1:4]) +
 
 ```{r, echo=FALSE}
 
-p <- ggplot(df2[!(chargeoff_reason %in% c("Bank by Mail / In Person",
-            "Other", "Opening Dep Chargeback"))], aes(x=days_to_negative_bal, fill = chargeoff_reason)) +
+p <- ggplot(df2[!(chargeoff_reason == "Other/Misc")], 
+            aes(x=days_to_negative_bal, fill = chargeoff_reason)) +
         geom_density(position="identity", alpha=0.4, color=NA) +
   labs(title = "Time to Negative Balance", caption = "Note: Bank by Mail / In Person, Opening Dep Chargeback, and Other charge-off reasons remove due to low counts.") +
   scale_fill_manual(values = my_colors[1:4])
@@ -504,17 +650,21 @@ p + theme(legend.title=element_blank(), legend.position=c(0.8,0.8))
 ```
 
 
-# Marketing Channel
+# Marketing Channels and Fraud
 
 ```{r, results = 'asis', echo=FALSE}
-tbl <- with(df, table(is_charged_off, marketing_channel_group)  )
+
+# Remove the "Ignore" group from data set
+df0 <- df[marketing_channel_group != "Ignore"]
+
+tbl <- with(df0, table(is_charged_off, marketing_channel_group)  )
  pct.tbl <- round(100*(prop.table(tbl, margin = 1)),2)
  colnames(pct.tbl) <- paste("pct",colnames(pct.tbl), sep=".") 
 # The next line constructs an interleaving index to rearrange the columns
 results <- cbind(tbl, pct.tbl)[, c( matrix(1:(2*ncol(tbl)), nrow=2, byrow=TRUE) )]
 
 marketing <- data.frame( "Affiliates" = paste0(results[,"Affiliates"], " (", results[,"pct.Affiliates"], "%)"),
-  "Ignore" = paste0(results[,"Ignore"], " (", results[,"pct.Ignore"], "%)"),
+  #"Ignore" = paste0(results[,"Ignore"], " (", results[,"pct.Ignore"], "%)"),
   "Organic" = paste0(results[,"Organic"], " (", results[,"pct.Organic"], "%)"),
   "PaidMedia" = paste0(results[,"PaidMedia"], " (", results[,"pct.PaidMedia"], "%)"),
   "Unattributed" = paste0(results[,"Unattributed"], " (", results[,"pct.Unattributed"], "%)"))
@@ -547,7 +697,9 @@ rownames(chargeoff_marketing) <- rownames(tbl)
 print(xtable(chargeoff_marketing, floating=TRUE, caption = "Marketing channel group by charged-off reason"), include.rownames=TRUE, scalebox='0.90', caption.placement = "top")
 ```
 
+Both Paid Media and Affiliates seem to have a higher rate among fradulent and charged-off accounts.
 
+## Paid Media
 
 
 ```{r, fig.height = 4, fig.width=5, echo = FALSE}
@@ -557,7 +709,6 @@ x <- df[is_charged_off == TRUE & marketing_channel_group == "PaidMedia"][,
 	.N, by = marketing_type][, rate := N/sum(N)][, customer_type := "customer"][]
 y <- df[is_charged_off == FALSE & marketing_channel_group == "PaidMedia"][,
  .N, by = marketing_type][, rate := N/sum(N)][, customer_type := "fraud"][]
-
 
 m <- rbindlist(list(x,y))
 m <- m[marketing_type != "Ignore"]
@@ -573,13 +724,92 @@ hp <- ggplot(m, aes(x= marketing_type, y = rate, fill = customer_type)) +
 hp + aes(fill = customer_type) + scale_fill_manual(values = my_colors[c(1,3)])
 ```
 
+The proportion of Search results is higher among fradulent/charged-off accounts, which could be a result of users seeking out institutions like Aspiration for more malicious behaviors.
+
+```{r, echo = FALSE}
+```{r, fig.height = 4, fig.width=5, echo = FALSE}
+
+df[, marketing_type := ifelse(is.na(utm_channel_type), "Unattributed", utm_channel_type)]
+
+small_groups <- df[marketing_channel_group == "Affiliates", 
+	.N, by = utm_source_clean][N < 150, utm_source_clean]
+
+df[marketing_channel_group == "Affiliates", utm_source_clean2 := ifelse(utm_source_clean %in% small_groups, "Other/Misc", utm_source_clean)]
+
+x <- df[is_charged_off == TRUE & marketing_channel_group == "Affiliates"][, 
+	.N, by = utm_source_clean2][, rate := N/sum(N)][, customer_type := "customer"][]
+y <- df[is_charged_off == FALSE & marketing_channel_group == "Affiliates"][,
+ .N, by = utm_source_clean2][, rate := N/sum(N)][, customer_type := "fraud"][]
+
+m <- rbindlist(list(x,y))
+
+hp <- ggplot(m, aes(x= utm_source_clean2, y = rate, fill = customer_type)) +
+	geom_bar(stat="identity", position=position_dodge()) +
+  scale_y_continuous(limits = c(0,1)) +
+    labs(title = "Affiliates by Customer Type", caption = "",
+         x = "Affiliates", y = "Proportion") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    	plot.title = element_text(hjust = 0.5), legend.position=c(0.2,0.8))
+
+hp + aes(fill = customer_type) + scale_fill_manual(values = my_colors[c(1,3)])
+
+
+```
+
+# Negative Account Balance Data by Charge-off Status
+
+```{r, echo = FALSE}
+#df[, ever_terminated := ifelse(!is.na(termination_date), TRUE, FALSE)]
+
+df2 <- df[is_charged_off == TRUE]
+
+df3 <- df[, .(hard_loss = sum(hard_loss_charge_off), lost_fees = sum(fees_charged_off)), 
+	by = .(negative_month, negative_week)]
+	
+df4 <- df[neg_balance_ever == TRUE, .N, by = .(negative_month, negative_week, is_charged_off)]
+#df4 <- df[neg_balance_ever == TRUE, .N, by = .(negative_month, negative_week, ever_terminated)]
+
+#df[, .N, by = .(neg_balance_ever, is_charged_off)]
+
+p <- ggplot(data = df4,
+  aes(negative_month, N, fill= is_charged_off)) +
+  stat_summary(fun.y = sum, 
+    geom = "bar") + 
+  scale_x_date(
+    labels = date_format("%b %Y"),
+    date_breaks = "2 month") +
+ # scale_y_continuous(limits = c(0,200000)) +
+  scale_fill_manual(values = my_colors[c(1,3)]) + 
+  labs( x = "Negative Account Date (Month)",
+        y = "Counts of Negative Accounts") 
+    
+p + ggtitle("Charged-off vs Not Charged-off by Negative Account Balance Date") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
+    	legend.title=element_blank())
+
+
+```
+
+# Recomentations
+
+## Data Quality
+
+Thus far, much, if not all, of the fraud reporting and labeling has been dictated by Radius. Numerous accounts have been found that display fraudulent behaviors, but have not been reported as fradulent by Radius to Aspiration. Review of such accounts as well as the continued work in the Ops department to take control over the process and procedures around mitigation of risk and fraud, including labeling, will improve the ability to monitor and model fraud.
+
+Furthermore, Radius has not passed on information regarding 1st or 3rd party fraud verses synthetic fraud. Since these groups tend to have very different qualities, it would be wise to differentiate between them going forward, so as best to target the different types of fraud while optimizing the customer experience for good customers.
+
+## Time to Account Termination
+
+The average time between an account going negative and it being charged-off ranged between 56 and 120 days. While radius has a standard of charging off accounts after 30 days of being over drafts, the data shows that they have not always stuck to their deadline. Shortening the time to account termination for fradulent accounts could prevent further loss.
+
 
 # TO DO
 
 
-- **Compare counts of fraud vs total accounts to see if rate of fraud is increasing or not**
+- ~~**Compare counts of fraud vs total accounts to see if rate of fraud is increasing or not**~~
 
-- **Charge-off per account incepted**
+- ~~**Charge-off per account incepted**~~
 
 - ~~**Cost by chargeoff reason in a stacked bar - fees vs hard loss by fraud loss type (facet_wrap?)**~~
 
@@ -593,7 +823,7 @@ hp + aes(fill = customer_type) + scale_fill_manual(values = my_colors[c(1,3)])
 
 - ~~**Look at utm channel type to see what is causing the increase in PaidMedia**~~
 
-- **Break down also by browser (chrome, etc)**
+- **Break down also by browser (chrome, etc)**: Data seems to be in `web_db.user_browser_fingerprint` table, but doesn't list actual browser names, just coded variables. Waiting for hear back on what the dummy labels correspond to.
 
 - **Distribution of accounts by states (counts of accounts vs fraud)**
 
@@ -601,8 +831,40 @@ hp + aes(fill = customer_type) + scale_fill_manual(values = my_colors[c(1,3)])
 
 - ~~**Add monthly counts of attempted date (aka, negative balance).**~~
 
-- **Break down fraud ratio by chrageoff type**
+- **Break down fraud ratio by chrageoff type**: This turns out to be harder said than done, but working on it
 
-- **Look at chargeoff types that have min of $0**
+- ~~**Look at chargeoff types that have min of $0**~~ This is due mostly to fees charged for OD accounts. Should we include in report?
 
-- **Remove low count of charge off groups**
+- ~~**Remove low count of charge off groups**~~
+
+- ~~**Update fraud count graphs to be on same x and y axis**~~
+
+- ~~**Next steps section to include difference between negative account date and charge off date as something that should be improved as a process and proceedure**~~
+
+- **Look at percentage of accounts that went negative but werent charged off as a comparision/validation of using negative account balace date - count be as a talking point, and if 3 days right? or is 10 days better? or dollar amount** - In process, confirming new data
+
+- ~~**Show graph of % of fraud inception**~~
+
+- **If I were to make a recommendation what would it be? Filter all the charts like that**
+
+- ~~**Collapse into 5 grouops, call it other/Misc**~~
+
+- ~~**trend of fraud by inception month/overall fraud by, what is industry**~~ Industry has been reported as ~10%, though some Fintech's have been reportedly closer to 35%. Current Aspiration rates seem very low, perhaps due to not actively onboarding? Or failure to correctly label all fraud due to Radius?
+
+- ~~**2 fraud rates: fraud by counts and fraud by dollars**~~
+
+- ~~**Note about no way to distinguish 1st vs 3 vs synthestic fraud**~~
+
+- ~~**Account severity: loss of 18K in External transfer and it was 10 people to see if it really increasing or if it's just that our volume is increasing**~~
+
+- ~~**Add graph of counts by inception date**~~
+
+- **Why do some people wait so long? After 200 days - compare customers who regularly engage account who then commit fraud. Is it sleeper accounts?** This needs more evaluation using a better metric
+
+- ~~**call out data mislabeling**~~
+
+- ~~**Look at affiliate fraud for marketing like done for paid media**~~
+
+- ~~**Move script and all coding to the end for an appendix**~~
+
+Fraud Section, Cost Section, 
