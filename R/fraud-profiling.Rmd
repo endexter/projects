@@ -41,6 +41,12 @@ df <- web_db("with od_accounts as (
     from public.user_audit_trail
      where audit_trail like '%Note: Disabled: Account being closed - OD over 30 days%'
 ),
+disabled_audit as (
+select user_id, min(date_created) as date_disabled
+from public.user_audit_trail
+  where lower(audit_trail) like '%disabled%'
+  group by 1
+),
 neg_accounts as (
   with all_results as (
     with t as (
@@ -104,8 +110,11 @@ f.state, f.customer_age, f.days_to_first_summit_debit_card_use, f.first_account_
   na.balance_date as first_negative_date,
   case when na.user_id is null then 0::boolean else 1::boolean end went_and_stayed_neg,
   case when du.user_id is null then 0::boolean else 1::boolean end disabled_user,
+  case when da.user_id is null then 0::boolean else 1::boolean end audit_trail_disabled,
+  da.date_disabled,
   d.balance_date::date - a.inception_date::date as days_to_negative_bal,
   h.termination_date::date - a.inception_date::date as days_to_termination,
+  da.date_disabled::date - d.balance_date::date as days_between_neg_disabled,
   case when d.balance_date is null then 0::boolean else 1::boolean end neg_balance_ever,
   case when f.utm_source in ('ph', 'fb', 'adwords', 'atez', 'dailykos', 'nw1', 'inboxdollars', 'instagram') then f.utm_source
     when f.utm_source in ('facebook', 'fb-unbounced', 'facebook.com') then 'fb'
@@ -136,6 +145,7 @@ left join public.dt_fraud_users_with_info h on f.external_user_id = h.external_u
 left join od_accounts oda on a.user_id = oda.user_id
 left join neg_accounts na on a.user_id = na.user_id
 left join disabled_users du on a.user_id = du.user_id
+left join disabled_audit da on a.user_id = da.user_id
 where f.total_accounts_opened > 0
 and a.account_type = 'Summit'
 and f.first_account_type = 'Summit'
@@ -270,7 +280,7 @@ p <- ggplot(data = df3,
         y = "Count") +
   scale_y_continuous(limits = c(0,500))
     
-p + ggtitle("Fraud Volume by Negative Account Date") +
+p1 <- p + ggtitle("Fraud Volume by Negative Account Date") +
 	theme(axis.text.x = element_text(angle = 45, hjust = 1),
     	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
     	legend.title=element_blank())
@@ -292,15 +302,17 @@ p <- ggplot(data = df3,
         y = "Count") +
   scale_y_continuous(limits = c(0,500))
     
-p + ggtitle("Monthly Fraud Counts by Charge-off/Termination Date") +
+p2 <- p + ggtitle("Fraud Counts by Charge-off/Termination Date") +
 	theme(axis.text.x = element_text(angle = 45, hjust = 1),
     	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
     	legend.title=element_blank())
 ```
 
-The above graph shows the discrepancy between when an account commits the fraudulent activity versus when the account is actually closed and charged-off, especially noticed by the sporadic spikes in termination date versus negative account date. Previously, much of the account maintenance and fraud mitigation was performed by Radius.
+The below graphs shows the discrepancy between when an account commits the fraudulent activity versus when the account is actually closed and charged-off, especially noticed by the sporadic spikes in termination date versus negative account date. Previously, much of the account maintenance and fraud mitigation was performed by Radius.
 
-```{r, echo=FALSE}
+There is a noticeable dip in fraud based on account inception (origination). Further investigation into on-boarding and/or marketing trends may shed further light, however comparing the rate of fraudulent account origination verse total account origination (as in the following graph) indicates that there was actually a more steady decrease in the rate of fraudulent account origination than the previous graph suggests (see figure bellow).
+
+```{r, echo=FALSE, fig.height = 10, fig.width=7}
 
 df3 <- df2[, .(count = .N), 
 	by = .(inception_month, inception_week)]
@@ -316,13 +328,14 @@ p <- ggplot(data = df3,
         y = "Count") +
   scale_y_continuous(limits = c(0,500))
     
-p + ggtitle("Monthly Fraud Counts by Inception Date") +
+p3 <- p + ggtitle("Fraud Counts by Inception Date") +
 	theme(axis.text.x = element_text(angle = 45, hjust = 1),
     	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
     	legend.title=element_blank())
+
+grid.arrange(p1, p2,p3, nrow = 3)
 ```
 
-There is a noticeable dip in fraud based on account inception (origination). Further investigation into on-boarding and/or marketing trends may shed further light, however comparing the rate of fraudulent account origination verse total account origination (as in the following graph) indicates that there was actually a more steady decrease in the rate of fraudulent account origination than the previous graph suggests (see figure bellow).
 
 ## Monthly Fraud Rate
 
@@ -348,12 +361,7 @@ p1 <- ggplot(data = df_fraud, aes(x = inception_month, y = fraud_rate)) +
         plot.title = element_text(hjust = 0.5)) 
 ```
 
-
-
-
-
-
-```{r, eval = FALSE, echo = FALSE}
+```{r, eval = FALSE, echo = FALSE, eval = FALSE}
 # Fraud rate by charge-off
 df[, ":=" (is_fraud = ifelse(is_charged_off == TRUE, 1, 0),
 	is_customer = ifelse(is_charged_off == FALSE, 1, 0))]
@@ -420,7 +428,7 @@ p3 <- ggplot(data = df_combined, aes(color = chargeoff_reason, y = fraud_rate, x
     	legend.title=element_blank()) +
   scale_y_continuous(limits = c(0,.1))  
 
-grid.arrange(p1, p2,p3, nrow = 3)
+grid.arrange(p1,p3, nrow = 3)
 ```
 
 
@@ -576,6 +584,13 @@ max_cost <- df_count[which.max(count)]
 
 # Cost of Fraud
 
+## Monthly Cost
+
+- **Total Loss:** The total amount charge-off amount for an account (hard loss + lost fees).
+- **Hard Loss:** The actual amount of money lost from a charge-off (realized loss).
+- **Lost Fees:** Fees that Aspiration was owed, but never collected (Deposited Item Reversal Fees, Check Reversal Fees, Over Draft Fees, etc.).
+
+
 
 
 ```{r, results='asis', echo = FALSE}
@@ -591,7 +606,7 @@ print(xtable(df2[, .(sum = make_money(sum(get(var))),
 	q75 = make_money(quantile(get(var), .75)),
 	max = max(make_money(max(get(var))))),
 	by = chargeoff_reason],
-	floating=FALSE, caption = "Total charged-off losses (principal + realized)"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
+	floating=FALSE, caption = "Total charged-off losses (fees + hard loss)"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
 ```
 
 ```{r, results='asis', echo = FALSE}
@@ -607,7 +622,7 @@ print(xtable(df2[, .(sum = make_money(sum(get(var))),
 	q75 = make_money(quantile(get(var), .75)),
 	max = max(make_money(max(get(var))))),
 	by = chargeoff_reason], 
-	floating=FALSE, caption = "Total charged-off losses (realized only)"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
+	floating=FALSE, caption = "Realized charged-off losses (hard loss only)"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
 
 ```
 
@@ -615,11 +630,6 @@ print(xtable(df2[, .(sum = make_money(sum(get(var))),
 As displayed in the tables above, much of the total losses related to NSF Behavior are not actually realized. While NSF Behavior makes up the majority of volume of charge-offs, it is in fact, one of the least costly, especially when compared to the cost of some of the other charge-off reasons as shown below.
 
 
-## Monthly Cost
-
-- **Total Loss:** The total amount charge-off amount for an account (hard loss + lost fees).
-- **Hard Loss:** The actual amount of money lost from a charge-off (realized loss).
-- **Lost Fees:** Fees that Aspiration was owed, but never collected (Deposited Item Reversal Fees, Check Reversal Fees, Over Draft Fees, etc.).
 
 
 ```{r, echo=FALSE}
@@ -642,9 +652,9 @@ p <- ggplot(data = df4,
   scale_y_continuous(limits = c(0,200000)) +
   scale_fill_manual(values = my_colors[c(1,3)]) + 
   labs( x = "Negative Account Date (Month)",
-        y = "Sum of Charge-off Loss ($)") 
+        y = "Sum of Charge-offs ($)") 
     
-p + ggtitle("Monthly Fraud Loss by Negative Account Balance Date") +
+p1 <- p + ggtitle("Fraud Loss by Negative Account Balance Date") +
 	theme(axis.text.x = element_text(angle = 45, hjust = 1),
     	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
     	legend.title=element_blank())
@@ -671,9 +681,9 @@ p <- ggplot(data = df4,
   scale_y_continuous(limits = c(0,200000)) +
   scale_fill_manual(values = my_colors[c(1,3)])  + 
   labs( x = "Charge-off/Termination Date (Month)",
-        y = "Sum of Charge-off Loss ($)") 
+        y = "Sum of Charge-offs ($)") 
     
-p + ggtitle("Monthly Fraud Loss by Charge-off Date") +
+p2 <- p + ggtitle("Fraud Loss by Charge-off Date") +
 	theme(axis.text.x = element_text(angle = 45, hjust = 1),
     	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
     	legend.title=element_blank())
@@ -683,7 +693,7 @@ p + ggtitle("Monthly Fraud Loss by Charge-off Date") +
 
 
 
-```{r, echo=FALSE}
+```{r, echo=FALSE, fig.height=10, fig.width=7}
 
 df2 <- df[is_charged_off == TRUE]
 
@@ -705,12 +715,14 @@ p <- ggplot(data = df4,
   scale_y_continuous(limits = c(0,200000)) +
   scale_fill_manual(values = my_colors[c(1,3)])  + 
   labs( x = "Account Inception Date (Month)",
-        y = "Sum of Charge-off Loss ($)") 
+        y = "Sum of Charge-offs ($)") 
     
-p + ggtitle("Monthly Fraud Loss by Inception Date") +
+p3 <- p + ggtitle("Fraud Loss by Inception Date") +
 	theme(axis.text.x = element_text(angle = 45, hjust = 1),
     	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
     	legend.title=element_blank())
+
+grid.arrange(p1, p2,p3, nrow = 3)
 
 ```
 
@@ -811,11 +823,41 @@ print(xtable(df2[!is.na(get(var)), .(mean = round2(mean(get(var), na.rm = TRUE))
 	q50 = round2(quantile(get(var), .50)),
 	q75 = round2(quantile(get(var), .75)),
 	max = round0(max(get(var)))), by = chargeoff_reason], 
-	  floating=TRUE, caption = "Days from account creation to negative balance"), 
+	  floating=TRUE, caption = "Time from account creation to negative balance (Days"), 
 	include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
 ```
 
 Both External Transfer Charge-backs and NSF Behavior has the larges volume as well as more accounts that have a longer time till committing fraud, though it seems mostly proportional to the other types of charge-backs, mostly differing in volume.
+
+```{r, results='asis', echo = FALSE, eval = FALSE}
+
+df_days <- df[od_30days_closed == TRUE & terminated == TRUE & is_charged_off == TRUE,
+	.(#count = .N, 
+	time_till_closed_mean = mean(days_to_termination, na.rm=TRUE),
+ 	time_till_closed_median = median(days_to_termination, na.rm=TRUE)), by = chargeoff_reason]
+
+
+print(xtable(df_days,
+             floating=FALSE, caption = "Time Till Termination Amoung Accounts Labeled For Closure by Radius"),
+      include.rownames=FALSE, caption.placement = "top")
+
+```
+
+```{r, results='asis', echo = FALSE}
+
+df_days <- df[audit_trail_disabled == TRUE & is_charged_off == TRUE & days_between_neg_disabled >= 0,
+	.(#count = .N, 
+	  days_to_disabled = mean(days_between_neg_disabled, na.rm = TRUE),
+	days_to_termination = mean(days_to_termination, na.rm=TRUE)), by = chargeoff_reason]
+
+print(xtable(df_days,
+             floating=FALSE, caption = "Time Till Account Disabled (Mean Days)"),
+      include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
+
+```
+
+
+
 
 ```{r, fig.height = 7, fig.width=7, echo=FALSE}
 hp <- ggplot(df2[!(chargeoff_reason == "Other/Misc")], 
@@ -918,13 +960,13 @@ hp <- ggplot(m, aes(x= marketing_type, y = rate, fill = customer_type)) +
 	theme(axis.text.x = element_text(angle = 45, hjust = 1),
     	plot.title = element_text(hjust = 0.5), legend.position=c(0.8,0.8))
 
-hp + aes(fill = customer_type) + scale_fill_manual(values = my_colors[c(1,3)])
+p1 <- hp + aes(fill = customer_type) + scale_fill_manual(values = my_colors[c(1,3)])
 ```
 
 The proportion of Search results is higher among fraudulent/charged-off accounts, which could be a result of users seeking out institutions like Aspiration for more malicious behaviors.
 
-```{r, echo = FALSE}
-#```{r, fig.height = 4, fig.width=5, echo = FALSE}
+```{r, echo = FALSE, fig.height=7, fig.width=7}
+
 
 df[, marketing_type := ifelse(is.na(utm_channel_type), "Unattributed", utm_channel_type)]
 
@@ -948,9 +990,9 @@ hp <- ggplot(m, aes(x= utm_source_clean2, y = rate, fill = customer_type)) +
 	theme(axis.text.x = element_text(angle = 45, hjust = 1),
     	plot.title = element_text(hjust = 0.5), legend.position=c(0.2,0.8))
 
-hp + aes(fill = customer_type) + scale_fill_manual(values = my_colors[c(1,3)])
+p2 <- hp + aes(fill = customer_type) + scale_fill_manual(values = my_colors[c(1,3)])
 
-
+grid.arrange(p1, p2, nrow=2)
 ```
 
 # Negative Account Balance Data by Fraud/Risk Group
@@ -992,8 +1034,6 @@ p + ggtitle("Charged-off vs Not Charged-off by Negative Account Balance Date") +
 
 ```{r, echo = FALSE}
 
-
-
 df[, fraud_label := ifelse(is_charged_off == TRUE, "Fraud",
 		ifelse(went_and_stayed_neg == TRUE, "Stayed Negative",
 			ifelse(terminated == TRUE, "Terminated",
@@ -1023,7 +1063,6 @@ ggplot(data = df4, aes(fill=fraud_factor, y=N, x=negative_month)) +
 
 
 ```{r, echo = FALSE, eval = FALSE}
-
 
 bad_domains <- c("gmx.com", "gmx.us", "ymail.com", "rocketmail.com", "protonmail.com",
 	"accountant.com", "126.com", "yandex.com", "armyspy.com", "yopmail.com",
@@ -1061,47 +1100,66 @@ ggplot(data = df4, aes(fill=fraud_factor, y=N, x=negative_month)) +
 ```
 
 
-```{r}
+
+```{r, results = 'asis', echo=FALSE, eval=FALSE}
+
+
+## Fraud Profiling
 
 # Top states
 df_states <- df[, .N, by = .(state, is_charged_off)]
 df_states[, total := sum(N), by = is_charged_off][, rate := round(N/total, 4), by = is_charged_off]
-df_states[order(-rate)][1:10]
+
+print(xtable(df_states[order(-rate)][1:10], floating=TRUE, caption = "High Frequency Customer States"), include.rownames=TRUE, scalebox='0.90', caption.placement = "top")
 
 # Customer age
-df[, .(mean_customer_age = round(mean(customer_age),2),
-       median_customer_age = median(customer_age)), by = .(is_charged_off)]
+#print(xtable(df[, .(mean_customer_age = round(mean(customer_age),2),
+#       median_customer_age = median(customer_age)), by = .(is_charged_off)], floating=TRUE, caption = "Customer Age #(Years)"), include.rownames=TRUE, scalebox='0.90', caption.placement = "top")
 
 # days to first summit debit card use
-df[, .(mean_days_till_first_debit = round(mean(days_to_first_summit_debit_card_use, na.rm= TRUE),2), 
+df_debit <- df[, .(mean_days_till_first_debit = round(mean(days_to_first_summit_debit_card_use, na.rm= TRUE),2), 
 	median_days_till_first_debit = median(days_to_first_summit_debit_card_use, na.rm=TRUE)), by = .(is_charged_off)]
 
+print(xtable(df_debit, floating=TRUE, caption = "Days to First Debit Card Usage"), include.rownames=TRUE, scalebox='0.90', caption.placement = "top")
+
 # Inital funding
-df[, .(mean_initial_funding_amount = round(mean(first_account_funding_amount, na.rm= TRUE),2), 
+df_fund <- df[, .(mean_initial_funding_amount = round(mean(first_account_funding_amount, na.rm= TRUE),2), 
 	median_initial_funding_amount = median(first_account_funding_amount, na.rm=TRUE)), by = .(is_charged_off)]
 
+print(xtable(df_fund, floating=TRUE, caption = "Initial Funding"), include.rownames=TRUE, scalebox='0.90', caption.placement = "top")
 
 ```
 
 
+
+
 # Recomentations
+
+## Addressing Fraud
+
+External Transaction Chargebacks make up the majority of realized money loss and should be addressed first in reducing overall fraud loss, while NSF Behavior has the largest volume of charge-offs, the amount of realized loss is one of the smallest costs.
 
 ## Data Quality
 
-Thus far, much, if not all, of the fraud reporting and labeling has been dictated by Radius. Numerous accounts have been found that display fraudulent behaviors, but have not been reported as fraudulent by Radius to Aspiration. Review of such accounts as well as the continued work in the Ops department to take control over the process and procedures around mitigation of risk and fraud, including labeling, will improve the ability to monitor and model fraud.
+Thus far, much, if not all, of the fraud reporting and labeling has been dictated by Radius. Numerous accounts have been found that display fraudulent behaviors, but have not been reported as fraudulent by Radius or have even been mislabed (i.e., NSF Behavior when in fact account is displaying External Transaction Chargebacks). Review of such accounts as well as the continued work in the Ops department to take control over the process and procedures around mitigation of risk and fraud, including labeling, will improve the ability to monitor and model fraud.
 
 Furthermore, Radius has not passed on information regarding 1st or 3rd party fraud verses synthetic fraud. Since these groups tend to have very different qualities, it would be wise to differentiate between them going forward, so as best to target the different types of fraud while optimizing the customer experience for good customers.
 
-## Time to Account Termination
+## Time to Account Termination/Disabling
 
-The average time between an account going negative and it being charged-off ranged between 56 and 120 days. While radius has a standard of charging off accounts after 30 days of being over drafts, the data shows that they have not always stuck to their deadline. Shortening the time to account termination for fraudulent accounts could prevent further loss.
+The average time between an account going negative and any feature being disable ranges from 30 to 74 days. While radius has a standard of charging off accounts after 30 days of being over drafted, the data shows that they have not always stuck to their deadline, even when it comes to disabling features.
 
+
+```{r, eval = FALSE, echo=FALSE}
 ## Data Breaches and Scripted Attacks on the Easiest Targets
 
 From anecdotal experience, some FinTechs saw a large spike in scripted 3rd Party ID Theft following the data breaches in May 2016 from Myspace and LinkedIn.
 
-# TO DO
+```
 
+```{r, echo = FALSE, eval = FALSE}
+
+# TO DO
 
 - ~~**Compare counts of fraud vs total accounts to see if rate of fraud is increasing or not**~~
 
@@ -1164,3 +1222,5 @@ From anecdotal experience, some FinTechs saw a large spike in scripted 3rd Party
 - ~~**Move script and all coding to the end for an appendix**~~
 
 Fraud Section, Cost Section, 
+
+```
