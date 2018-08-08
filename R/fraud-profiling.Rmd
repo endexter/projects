@@ -1,6 +1,5 @@
 ---
 title: "Fraud Profiling"
-subtitle: "MVP"
 output:
   pdf_document:
     toc: true
@@ -36,24 +35,58 @@ library(scales)
 
 ```{r, eval = TRUE, echo = FALSE}
 
-df <- web_db("select
+df <- web_db("with od_accounts as (
+    select distinct user_id
+    from public.user_audit_trail
+     where audit_trail like '%Note: Disabled: Account being closed - OD over 30 days%'
+),
+neg_accounts as (
+  with all_results as (
+    with t as (
+      select
+        db.depository_id,
+        min(db.id) as first_negative_id
+      from public.depository_balance db
+      where db.current_balance < 0
+      group by db.depository_id
+    )
+    select
+      t.*,
+      t2.current_balance,
+      t2.balance_date
+    from t
+      left join public.depository_balance t2 on t.first_negative_id = t2.id
+    where not exists(select *
+      from public.depository_balance db3
+      where db3.depository_id = t.depository_id
+           and db3.id > t.first_negative_id
+           and db3.current_balance > 0)
+  )
+  select
+    ar.*,
+    u.user_email,
+    u.user_id,
+    u.is_fraud_or_chargeoff
+  from all_results ar
+    left join public.depository d on ar.depository_id = d.id
+    left join public.user_account ua on d.account_id = ua.account_id
+    left join public.dt_users u on ua.user_id = u.user_id
+),
+disabled_users as (
+  select distinct user_id 
+  from public.user_cohorts 
+  where cohorts_id in (22,23)
+)
+select
   a.user_id,
-  --f.user_email,
+  f.user_email,
   a.is_charged_off,
   a.chargeoff_reason,
   a.total_amount_charged_off,
   a.hard_loss_charge_off,
   a.fees_charged_off,
   a.application_created_datetime,
-  --a.funding_bank_account_id,
-  --a.funding_amount,
   a.inception_date,
-  --a.depository_id,
-  --d.balance_date,
-  --f.lead_source,
-  --f.utm_source,
-  --f.utm_content,
-  --f.initial_product_selected,
   f.utm_campaign,
   f.utm_medium,
   f.utm_source_clean,
@@ -63,28 +96,29 @@ df <- web_db("select
   f.is_signed_up,
   f.first_account_type,
   f.total_accounts_opened,
-  d.balance_date as negative_bal_date,
   h.termination_date,
+  d.balance_date as negative_bal_date,
+  na.balance_date as first_negative_date,
+  case when na.user_id is null then 0::boolean else 1::boolean end went_and_stayed_neg,
+  case when du.user_id is null then 0::boolean else 1::boolean end disabled_user,
   d.balance_date::date - a.inception_date::date as days_to_negative_bal,
   h.termination_date::date - a.inception_date::date as days_to_termination,
   case when d.balance_date is null then 0::boolean else 1::boolean end neg_balance_ever,
-  case when f.utm_source in ('ph', 'fb', 'adwords', 'atez', 'dailykos', 'nw1', 
-      'inboxdollars', 'instagram') then f.utm_source
+  case when f.utm_source in ('ph', 'fb', 'adwords', 'atez', 'dailykos', 'nw1', 'inboxdollars', 'instagram') then f.utm_source
     when f.utm_source in ('facebook', 'fb-unbounced', 'facebook.com') then 'fb'
     when f.utm_source is null then 'none'
     else 'utm_other' end marketing_channel,
   case when a.chargeoff_reason is null then 'Not Fraud'
     when a.chargeoff_reason in ('ATM Dep Chargeback', 'Bank by Mail / In Person',
       'Mobile Dep Chargeback', 'Early Detected Fraud',
-      'Opening Dep Chargeback', 'Other') then 
-          'ATM Chargeback/Early Detected/Mobile Dep Chargeback/Other'
-    else a.chargeoff_reason end fraud_type
+      'Opening Dep Chargeback', 'Other') then 'ATM Chargeback/Early Detected/Mobile Dep Chargeback/Other'
+    else a.chargeoff_reason end fraud_type,
+  case when oda.user_id is null then 0::boolean else 1::boolean end od_30days_closed
 from public.dt_accounts a
 left join (
     with neg_bal as (
     select *,
-      max(current_balance) over (order by 
-        balance_date rows between 2 preceding and current row) as max_balance
+      max(current_balance) over (order by balance_date rows between 2 preceding and current row) as max_balance
     from public.depository_balance
     where current_balance < 0
     order by balance_date
@@ -96,6 +130,9 @@ left join (
     ) d on a.unique_account_id = concat('d',d.depository_id)
 left join public.dt_users f on a.user_id = f.user_id
 left join public.dt_fraud_users_with_info h on f.external_user_id = h.external_user_id
+left join od_accounts oda on a.user_id = oda.user_id
+left join neg_accounts na on a.user_id = na.user_id
+left join disabled_users du on a.user_id = du.user_id
 where f.total_accounts_opened > 0
 and a.account_type = 'Summit'
 and f.first_account_type = 'Summit'
@@ -155,6 +192,16 @@ df[, chargeoff_reason := ifelse(is.na(chargeoff_reason), NA,
 	ifelse(chargeoff_reason %in% c("NSF Behavior", "Ext Tran Chargeback",
 		"Mobile Dep Chargeback", "ATM Dep Chargeback"), chargeoff_reason, "Other/Misc"))]
 
+df[, terminated := ifelse(!is.na(termination_date), TRUE, FALSE)]
+
+df[, fraud_label := ifelse(is_charged_off == TRUE, "Fraud",
+		ifelse(went_and_stayed_neg == TRUE, "Stayed Negative",
+			ifelse(terminated == TRUE, "Terminated",
+				ifelse(disabled_user == TRUE, "Disabled", 
+					ifelse(neg_balance_ever == TRUE, "Unknown", NA)))))]
+
+df[, fraud_factor := factor(fraud_label, levels = c("Unknown", "Disabled", "Terminated", "Stayed Negative", "Fraud"))]
+
 # Get min and max dates for plotting
 min_date <- df[, min(inception_month)]
 max_date <- max(df[, max(termination_month, na.rm=TRUE)], df[, max(inception_month)])
@@ -198,7 +245,7 @@ Four different methods of determining monthly fraud trends are presented below. 
 - **Negative Account Date:** The date at which an account becomes negative and stays negative for at least three consecutive days. This is in attempt to determine that date that the fradulant activity occured.
 - **Charge-off/Termination Date:** The date that an account was charged-off, normally corresponding with an account termination.
 - **Inception Date:** The date that the account was created.
-- **Fraud Rate:** The proportion of fraudulent accounts versus non-fradulent accounts, calculated by any of the above date definitions.
+- **Fraud Rate:** The proportion of fraudulent accounts over total accounts, calculated by any of the above date definitions.
 
 ## Monthly Counts
 
@@ -289,7 +336,7 @@ ggplot(data = df_fraud, aes(x = inception_month, y = fraud_rate)) +
     labels = date_format("%b %Y"),
     date_breaks = "2 month") +
   scale_y_continuous(limits = c(0,.1)) + 
-  labs(title = "Rate of Fraudulent Account Creation", y = "Number of Fraudulent Accounts/Total Accounts", x = "Account Inception Month") +
+  labs(title = "Fraud Rate by Inception Month", y = "Number of Fraudulent Accounts/Total Accounts", x = "Account Inception Month") +
   theme(legend.position="none", axis.text.x = element_text(angle = 45, hjust = 1))
 
 ```
@@ -525,7 +572,7 @@ df2 <- df[is_charged_off == TRUE]
 
 # Just Realized
 df3 <- df2[!(chargeoff_reason %in% c("Bank by Mail / In Person",
-            "Other", "Opening Dep Chargeback")),
+            "Other", "Opening Dep Chargeback", "Other/Misc")),
            .(hard_loss = sum(hard_loss_charge_off), 
                lost_fees = sum(fees_charged_off)), 
 	by = .(negative_month, negative_week, chargeoff_reason)]
@@ -545,8 +592,8 @@ p <- ggplot(data = df4,
               ncol = 1) +
   labs( x = "Month Accounts Went Negative",
         y = "Charge-off Cost (dollars)",
-        caption = "Note: Bank by Mail / In Person, Opening Dep Chargeback, and Other charge-off reasons remove due to low counts.") +
-    scale_fill_manual(values = my_colors[1:4])
+        caption = "Note: Bank by Mail / In Person, Opening Dep Chargeback, and Other charge-off reasons remove due to low counts.") #+
+    #scale_fill_manual(values = my_colors[1:4])
     
 p + ggtitle("Monthly Fraud Loss by Negative Account Date") +
 	theme(axis.text.x = element_text(angle = 45, hjust = 1),
@@ -585,7 +632,7 @@ ggplot(data = df3,
 	theme(legend.position="none", axis.text.x = element_text(angle = 45, hjust = 1)) + 
 	labs(title = "Account Severity (Hard Loss)", caption = "",
          x = "Negative Account Balance Date (Month)", 
-         y = "Rate of Hard Loss by Count of Negative Accounts",
+         y = "Rate of Hard Loss by Count of Negative Accounts ($)",
 	     caption = "Note: Bank by Mail / In Person, Opening Dep Chargeback, and Other charge-off reasons remove due to low counts.") 
 
 ```
@@ -758,18 +805,10 @@ hp + aes(fill = customer_type) + scale_fill_manual(values = my_colors[c(1,3)])
 
 # Negative Account Balance Data by Charge-off Status
 
-```{r, echo = FALSE}
-#df[, ever_terminated := ifelse(!is.na(termination_date), TRUE, FALSE)]
+```{r, echo = FALSE, eval=FALSE}
 
-df2 <- df[is_charged_off == TRUE]
-
-df3 <- df[, .(hard_loss = sum(hard_loss_charge_off), lost_fees = sum(fees_charged_off)), 
-	by = .(negative_month, negative_week)]
-	
-df4 <- df[neg_balance_ever == TRUE, .N, by = .(negative_month, negative_week, is_charged_off)]
-#df4 <- df[neg_balance_ever == TRUE, .N, by = .(negative_month, negative_week, ever_terminated)]
-
-#df[, .N, by = .(neg_balance_ever, is_charged_off)]
+df4 <- df[neg_balance_ever == TRUE, .N, 
+          by = .(negative_month, negative_week, is_charged_off)]
 
 p <- ggplot(data = df4,
   aes(negative_month, N, fill= is_charged_off)) +
@@ -788,8 +827,26 @@ p + ggtitle("Charged-off vs Not Charged-off by Negative Account Balance Date") +
     	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
     	legend.title=element_blank())
 
-
 ```
+
+
+
+```{r, echo = FALSE}
+df4 <- df[!is.na(negative_month), .N, by = .(negative_month, fraud_factor)]
+ggplot(data = df4, aes(fill=fraud_factor, y=N, x=negative_month)) +
+    geom_bar( stat="identity") +
+    scale_x_date(
+    	labels = date_format("%b %Y"),
+   		date_breaks = "2 month") +
+    scale_fill_manual(values = my_colors[1:5]) + 
+    labs( title = "Negative Accounts by Fraud Risk Group", 
+    	x = "Negative Account Date (Month)",
+        y = "Counts of Negative Accounts") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    	plot.title = element_text(hjust = 0.5), legend.position=c(0.1,0.85),
+    	legend.title=element_blank())
+```
+
 
 # Recomentations
 
