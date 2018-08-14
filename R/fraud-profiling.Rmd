@@ -83,7 +83,61 @@ disabled_users as (
   select distinct user_id 
   from public.user_cohorts 
   where cohorts_id in (22,23)
+),
+total_deposits_withdrawals as (
+  with period_deposits_withdrawals as (
+  select unique_account_id,
+    ach_deposit_count, atm_deposit_count, check_deposit_count,
+    ach_deposit_count + atm_deposit_count + check_deposit_count as total_deposits,
+    ach_withdrawal_count, atm_withdrawal_count, check_withdrawal_count,
+    ach_withdrawal_count + atm_withdrawal_count + check_withdrawal_count as total_withdrawals
+  from  public.dt_account_period_data
+  where thirty_day_periods_since_inception < 7
+  )
+  select unique_account_id,
+  sum(total_deposits) as total_deposits,
+  sum(total_withdrawals) as total_withdrawals
+  from period_deposits_withdrawals
+  group by 1
+  order by 1
+),
+browser_data as (
+with top_browser as (
+with browser_counts as (
+with browsers as (
+select
+  b.user_id,
+  case when b.browser_name = 0 then 'Unknown'
+    when b.browser_name = 1 then 'Android Browser'
+    when b.browser_name = 2 then 'Chrome'
+    when b.browser_name = 3 then 'Chromium'
+    when b.browser_name = 4 then 'Edge'
+    when b.browser_name = 5 then 'Firefox'
+    when b.browser_name = 6 then 'IE'
+    when b.browser_name = 7 then 'Safari'
+    when b.browser_name = 8 then 'Mozilla'
+    when b.browser_name = 9 then 'Netscape'
+    when b.browser_name = 10 then 'Opera'
+    when b.browser_name = 11 then 'Phantom JS'
+  end browser_description
+from public.user_browser_fingerprint b
+where b.browser_name is not null
+and b.user_id is not null
 )
+select user_id, browser_description, count(*) as browser_count
+from browsers
+group by 1,2
+)
+select user_id, browser_description,
+  row_number() over (partition by user_id order by browser_count desc) as browser_rank
+from browser_counts
+order by user_id, browser_rank
+)
+select user_id, browser_description as browser_name
+from top_browser
+where browser_rank = 1
+)
+
 select
   a.user_id,
   f.user_email,
@@ -125,7 +179,10 @@ f.state, f.customer_age, f.days_to_first_summit_debit_card_use, f.first_account_
       'Mobile Dep Chargeback', 'Early Detected Fraud',
       'Opening Dep Chargeback', 'Other') then 'ATM Chargeback/Early Detected/Mobile Dep Chargeback/Other'
     else a.chargeoff_reason end fraud_type,
-  case when oda.user_id is null then 0::boolean else 1::boolean end od_30days_closed
+  case when oda.user_id is null then 0::boolean else 1::boolean end od_30days_closed,
+  tdw.total_deposits,
+  tdw.total_withdrawals,
+  case when bd.browser_name is null then 'Unknown' else bd.browser_name end browser_name
 from public.dt_accounts a
 left join (
     with neg_bal as (
@@ -146,6 +203,8 @@ left join od_accounts oda on a.user_id = oda.user_id
 left join neg_accounts na on a.user_id = na.user_id
 left join disabled_users du on a.user_id = du.user_id
 left join disabled_audit da on a.user_id = da.user_id
+left join total_deposits_withdrawals tdw on a.unique_account_id = tdw.unique_account_id
+left join browser_data bd on a.user_id = bd.user_id
 where f.total_accounts_opened > 0
 and a.account_type = 'Summit'
 and f.first_account_type = 'Summit'
@@ -171,7 +230,7 @@ my_colors <- c("#1165bf", "#119fbf", "#37bf72", "#f2ac16", "#d94514", "#b6babf")
 
 ## Fraud/Charge-off Definitions
 
-* **NSF Behavior:** *Non-Sufficient Funds or overdrafts often related to debit preauthorization or debit hold issues.*
+* **NSF Behavior:** *Non-Sufficient Funds or overdrafts often related to debit pre-authorization or debit hold issues.*
 * **Mobile Deposit Chargeback:** *Mobile deposit returned by issuing bank, often leading to overdrawn accounts when customers spend the provisional credits.*
 * **External Transfer Chargeback** *Customers spending provisionally credited funds transferred into their account before the funds are returned to the sending bank.*
 * **Opening Deposit Chargeback** *Deposit used to open account is returned to issuing bank.*
@@ -827,7 +886,7 @@ print(xtable(df2[!is.na(get(var)), .(mean = round2(mean(get(var), na.rm = TRUE))
 	include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
 ```
 
-Both External Transfer Charge-backs and NSF Behavior has the larges volume as well as more accounts that have a longer time till committing fraud, though it seems mostly proportional to the other types of charge-backs, mostly differing in volume.
+Both External Transfer Chargebacks and NSF Behavior has the larges volume as well as more accounts that have a longer time till committing fraud, though it seems mostly proportional to the other types of chargebacks, mostly differing in volume.
 
 ```{r, results='asis', echo = FALSE, eval = FALSE}
 
@@ -835,7 +894,6 @@ df_days <- df[od_30days_closed == TRUE & terminated == TRUE & is_charged_off == 
 	.(#count = .N, 
 	time_till_closed_mean = mean(days_to_termination, na.rm=TRUE),
  	time_till_closed_median = median(days_to_termination, na.rm=TRUE)), by = chargeoff_reason]
-
 
 print(xtable(df_days,
              floating=FALSE, caption = "Time Till Termination Amoung Accounts Labeled For Closure by Radius"),
@@ -1101,16 +1159,15 @@ ggplot(data = df4, aes(fill=fraud_factor, y=N, x=negative_month)) +
 
 
 
-```{r, results = 'asis', echo=FALSE, eval=FALSE}
-
+```{r, results = 'asis', echo=FALSE, eval=TRUE}
 
 ## Fraud Profiling
 
 # Top states
-df_states <- df[, .N, by = .(state, is_charged_off)]
-df_states[, total := sum(N), by = is_charged_off][, rate := round(N/total, 4), by = is_charged_off]
+#df_states <- df[, .N, by = .(state, is_charged_off)]
+#df_states[, total := sum(N), by = is_charged_off][, rate := round(N/total, 4), by = is_charged_off]
 
-print(xtable(df_states[order(-rate)][1:10], floating=TRUE, caption = "High Frequency Customer States"), include.rownames=TRUE, scalebox='0.90', caption.placement = "top")
+#print(xtable(df_states[order(-rate)][1:10], floating=TRUE, caption = "High Frequency Customer States"), #include.rownames=TRUE, scalebox='0.90', caption.placement = "top")
 
 # Customer age
 #print(xtable(df[, .(mean_customer_age = round(mean(customer_age),2),
@@ -1133,17 +1190,6 @@ print(xtable(df_fund, floating=TRUE, caption = "Initial Funding"), include.rowna
 
 
 
-# Recomentations
-
-## Addressing Fraud
-
-External Transaction Chargebacks make up the majority of realized money loss and should be addressed first in reducing overall fraud loss, while NSF Behavior has the largest volume of charge-offs, the amount of realized loss is one of the smallest costs.
-
-## Data Quality
-
-Thus far, much, if not all, of the fraud reporting and labeling has been dictated by Radius. Numerous accounts have been found that display fraudulent behaviors, but have not been reported as fraudulent by Radius or have even been mislabed (i.e., NSF Behavior when in fact account is displaying External Transaction Chargebacks). Review of such accounts as well as the continued work in the Ops department to take control over the process and procedures around mitigation of risk and fraud, including labeling, will improve the ability to monitor and model fraud.
-
-Furthermore, Radius has not passed on information regarding 1st or 3rd party fraud verses synthetic fraud. Since these groups tend to have very different qualities, it would be wise to differentiate between them going forward, so as best to target the different types of fraud while optimizing the customer experience for good customers.
 
 ## Time to Account Termination/Disabling
 
@@ -1157,7 +1203,79 @@ From anecdotal experience, some FinTechs saw a large spike in scripted 3rd Party
 
 ```
 
-```{r, echo = FALSE, eval = FALSE}
+## Users who went negative after 200 + days
+
+Comparing deposite counts and withdrawals among users who first went negative after 200 days, those who stayed negative, and those who did not.
+
+```{r, echo = FALSE, results = 'asis'}
+
+df[, neg_after_200_days := ifelse(!is.na(days_to_negative_bal) & days_to_negative_bal > 207, TRUE, FALSE)]
+
+df2 <- df[, .(#count = .N,
+	avg_deposits = mean(total_deposits, na.rm=TRUE),
+	median_deposits = median(total_deposits, na.rm=TRUE),
+	avg_withdrawals = mean(total_withdrawals, na.rm=TRUE),
+	median_withdrawals = median(total_withdrawals, na.rm=TRUE)), 
+	by = .(went_and_stayed_neg, neg_after_200_days)][order(went_and_stayed_neg, neg_after_200_days)]
+
+print(xtable(df2, floating=TRUE, caption = "Account activity during first 200 days"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
+
+```
+
+
+
+```{r, echo = FALSE, results = 'asis'}
+
+df2 <- df[, .N, by = .(is_charged_off, browser_name)][, head(.SD, 5), by = is_charged_off][
+  order(is_charged_off, -N)]
+
+print(xtable(df2, floating=TRUE, caption = "Top 5 browsers between fraud and non-fraud"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
+
+```
+
+
+```{r, echo = FALSE, results = 'asis'}
+
+df2 <- df[, .N, by = .(is_charged_off, state)][, head(.SD, 5), by = is_charged_off][
+  order(is_charged_off, -N)]
+
+print(xtable(df2, floating=TRUE, caption = "Top 5 states between fraud and non-fraud"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
+
+```
+
+
+```{r, echo = FALSE, results = 'asis'}
+
+df2 <- df[, .N, by = .(is_charged_off, email_domain)][, head(.SD, 5), by = is_charged_off][
+  order(is_charged_off, -N)]
+
+print(xtable(df2, floating=TRUE, caption = "Top 5 email domains between fraud and non-fraud"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
+
+```
+
+
+## Example of a user who continued to commit fraud after going negative the first time
+
+User with email `pbou11@yahoo.com`, overdrafted their account by around $3K due to ACH returns, refunded the account via multiple additional ACH transfer, withdrew the money and had the ACH's all return again, resulting in a chargeoff of over $8K before their account was disabled.
+
+
+# Recomentations
+
+## Addressing Fraud
+
+External Transaction Chargebacks make up the majority of realized money loss and should be addressed first in reducing overall fraud loss, while NSF Behavior has the largest volume of charge-offs, the amount of realized loss is one of the smallest costs.
+
+## Data Quality
+
+Thus far, much, if not all, of the fraud reporting and labeling has been dictated by Radius. Numerous accounts have been found that display fraudulent behaviors, but have not been reported as fraudulent by Radius or have even been mislabeled (i.e., NSF Behavior when in fact account is displaying External Transaction Charge backs). Review of such accounts as well as the continued work in the Ops department to take control over the process and procedures around mitigation of risk and fraud, including labeling, will improve the ability to monitor and model fraud.
+
+Furthermore, Radius has not passed on information regarding 1st or 3rd party fraud verses synthetic fraud. Since these groups tend to have very different qualities, it would be wise to differentiate between them going forward, so as best to target the different types of fraud while optimizing the customer experience for good customers.
+
+
+## Time to Account Termination/Disabling
+
+The average time between an account going negative and any feature being disable ranges from 30 to 74 days. While radius has a standard of charging off accounts after 30 days of being over drafted, the data shows that they have not always stuck to their deadline, even when it comes to disabling features.
+
 
 # TO DO
 
@@ -1171,17 +1289,11 @@ From anecdotal experience, some FinTechs saw a large spike in scripted 3rd Party
 
 - ~~**Switch from histograms to density plots**~~
 
-- **Look at edge cases, give some qualitative insight**
-
 - ~~**Ignore ignore from marketing tables**~~
 
 - ~~**Look at utm channel type to see what is causing the increase in PaidMedia**~~
 
-- **Break down also by browser (chrome, etc)**: Data seems to be in `web_db.user_browser_fingerprint` table, but doesn't list actual browser names, just coded variables. Waiting for hear back on what the dummy labels correspond to.
 
-- **Distribution of accounts by states (counts of accounts vs fraud)**
-
-- **Profiling fraud vs non with account origination data**
 
 - ~~**Add monthly counts of attempted date (aka, negative balance).**~~
 
@@ -1213,14 +1325,57 @@ From anecdotal experience, some FinTechs saw a large spike in scripted 3rd Party
 
 - ~~**Add graph of counts by inception date**~~
 
-- **Why do some people wait so long? After 200 days - compare customers who regularly engage account who then commit fraud. Is it sleeper accounts?** This needs more evaluation using a better metric
-
 - ~~**call out data mislabeling**~~
 
 - ~~**Look at affiliate fraud for marketing like done for paid media**~~
 
 - ~~**Move script and all coding to the end for an appendix**~~
 
-Fraud Section, Cost Section, 
+  
+##Follow ups from Andrei
 
+- ~~**Ask Stephen or Valarie if we pay for all of the farud losses (including NPS)**~~ Going forward, we wil pay for all losses starting from July. Prior, we only paid for ACH loss initiated through our website.
+  
+- ~~**Distribution of accounts by states (counts of accounts vs fraud)**~~ Shows top 5 states by chargedoff vs not
+
+- ~~**Profiling fraud vs non with account origination data**~~
+  
+- ~~**Break down also by browser (chrome, etc)**: Data seems to be in `web_db.user_browser_fingerprint` table, but doesn't list actual browser names, just coded variables. Waiting for hear back on what the dummy labels correspond to.~~
+
+- **Look at edge cases, give some qualitative insight**
+  
+- ~~**Why do some people wait so long? After 200 days - compare customers who regularly engage account who then commit fraud. Is it sleeper accounts?**~~ This needs more evaluation using a better metric
+
+- **Bring back more purposals of processes we are trying to change** (before meeting with Ops team)
+
+- ~~**Bring back examples of people committing fraud between being going nedagive and being diabled**~~ Added 1 user, but need to figure out way to quantify it (need to link up users who went negative, and had an additional return of some kind, how to do this since Radius does not give timestamps back with transactino data, i.e., not sure of the actual order of transactions)
+
+- **Purpose hard cuttoff for disabling accounts (example if they go negative once, we forgive, but twice we disable - purposal section)** - dependent on the above
+  
+- **Why is ATM Severity higher the highest severity**
+
+```{r, echo = FALSE, eval = FALSE}
 ```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
