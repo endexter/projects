@@ -431,27 +431,6 @@ p1 <- ggplot(data = df_fraud, aes(x = inception_month, y = fraud_rate)) +
         plot.title = element_text(hjust = 0.5)) 
 ```
 
-```{r, eval = FALSE, echo = FALSE, eval = FALSE}
-# Fraud rate by charge-off
-df[, ":=" (is_fraud = ifelse(is_charged_off == TRUE, 1, 0),
-	is_customer = ifelse(is_charged_off == FALSE, 1, 0))]
-	
-# Get monthly customer counts
-df_customers <- df[, .(customer_count = sum(is_customer)), by = inception_month]
-
-# Get fraud counts by fraud label
-df_fraud <- df[!is.na(fraud_factor)][, .(fraud_count = sum(is_fraud)), by = .(inception_month, fraud_factor)]
-
-df_combined <- merge(df_fraud, df_customers, by = "inception_month", all.x=TRUE)
-df_combined[fraud_factor == "Stayed Negative"]
-
-df_combined[, fraud_rate := fraud_count/customer_count]
-
-ggplot(data = df_combined,
-       aes(x = inception_month, y = fraud_rate, color = fraud_factor)) +
-       geom_line()
-
-```
 
 
 ```{r, echo = FALSE, fig.height = 10, fig.width=7}
@@ -502,151 +481,8 @@ grid.arrange(p1,p3, nrow = 3)
 ```
 
 
-```{r, eval = FALSE, echo = FALSE}
-# Fraud rate by charge-off
-df[, ":=" (is_fraud = ifelse(is_charged_off == TRUE, 1, 0),
-	is_customer = ifelse(is_charged_off == FALSE, 1, 0))]
-	
-# Get monthly customer counts
-df_customers <- df[, .(customer_count = sum(is_customer)), by = inception_month]
-
-# Get fraud counts by fraud label
-df_fraud <- df[!is.na(fraud_factor)][, .(fraud_count = sum(is_fraud)), by = .(inception_month, fraud_factor)]
-
-df_combined <- merge(df_fraud, df_customers, by = "inception_month", all.x=TRUE)
-df_combined[fraud_factor == "Stayed Negative"]
-
-df_combined[, fraud_rate := fraud_count/customer_count]
-
-ggplot(data = df_combined,
-       aes(x = inception_month, y = fraud_rate, color = fraud_factor)) +
-       geom_line()
-
-p3 <- ggplot(data = df_combined, aes(fill= fraud_factor, y= fraud_rate, x= inception_month)) +
-    geom_bar( stat="identity") +
-    scale_x_date(limits = c(min_date, max_date),
-    	labels = date_format("%b %Y"),
-   		date_breaks = "2 month") +
-    scale_fill_manual(values = my_colors[1:4]) + 
-    labs( title = "Fraud Rate by Inception Date and Risk Group", 
-    	x = "Negative Account Date (Month)",
-        y = "Counts of Negative Accounts") +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1),
-    	plot.title = element_text(hjust = 0.5), legend.position=c(0.85,0.8),
-    	legend.title=element_blank()) +
-  scale_y_continuous(limits = c(0,.1)) 
-
-p3
-
-```
-
-```{r, eval = FALSE, echo = FALSE}
-#Fraud Risk Groups
-df[, fraud_label := ifelse(is_charged_off == TRUE, "Fraud",
-		ifelse(went_and_stayed_neg == TRUE, "Stayed Negative",
-			ifelse(terminated == TRUE, "Terminated",
-				ifelse(disabled_user == TRUE, "Disabled", 
-					ifelse(neg_balance_ever == TRUE, "Negative Balance", NA)))))]
-
-df[, fraud_factor := factor(fraud_label, levels = c("Negative Balance", "Disabled", "Terminated", "Stayed Negative", "Fraud"))]
-
-df[, ":=" (is_fraud = ifelse(is_charged_off == TRUE, 1, 0),
-	is_customer = ifelse(is_charged_off == FALSE, 1, 0))]
-	
-# Get monthly customer counts
-df_customers <- df[, .(customer_count = sum(is_customer)), by = inception_month]
-
-# Get fraud counts by fraud label
-df_fraud <- df[!is.na(fraud_factor)][, .(fraud_count = sum(is_fraud)), by = .(inception_month, fraud_factor)]
-
-df_combined <- merge(df_fraud, df_customers, by = "inception_month", all.x=TRUE)
-
-df_combined[, fraud_rate := fraud_count/customer_count]
-df_combined
-
-ggplot(data = df_combined,
-       aes(x = inception_month, y = fraud_rate, color = fraud_factor)) +
-       geom_line()
-
-```
 
 Aside from February and March of 2016, the rate of fraudulent accounts created has been going down when compared to total account origination. However, most (if not all) of the charge-off/fraud data labeling has been heavily relied on by Radius. Spot checking a number of account who went negative and never became positive has indicated that there may be upwards to an additional 30% of accounts that should have been charged-off or labeled as such, but currently have not been. This is likely due to the processes and procedures dictated by Radius.
-
-
-```{r, eval = FALSE, echo = FALSE}
-# Query to show charged-off negative accounts vs non-cahrged-off
--- this may be it finally
-with all_results2 as (
-  with all_results as (
-    with t as (
-        select
-          db.depository_id,
-          min(db.id) as first_negative_id
-        from web_db.depository_balance db
-        where db.current_balance < 0
-        group by db.depository_id
-    )
-    select
-      t.*,
-      t2.current_balance,
-      t2.balance_date
-    from t
-      left join web_db.depository_balance t2 on t.first_negative_id = t2.id
-    where not exists(select *
-                     from web_db.depository_balance db3
-                     where
-                       db3.depository_id = t.depository_id
-                       and db3.id > t.first_negative_id
-                       and db3.current_balance > 0)
-  )
-  select
-    ar.*,
-    u.user_email,
-    u.is_fraud_or_chargeoff
-  from all_results ar
-    left join web_db.depository d on ar.depository_id = d.id
-    left join web_db.user_account ua on d.account_id = ua.account_id
-    left join bi.dt_users u on ua.user_id = u.user_id
-)
-  --select is_fraud_or_chargeoff, count(*)
-select is_fraud_or_chargeoff, count(*)
-from all_results2
-group by 1;
-
-```
-
-```{r, echo = FALSE, eval = FALSE}
-# Place holder for doing fraud rate by charge-off type
-# Note that most of the below code will need to be rewritten to format the data correctly
-df[, ":=" (is_fraud = ifelse(is_charged_off == TRUE, 1, 0),
-	is_customer = ifelse(is_charged_off == FALSE, 1, 0))]
-
-df[, customer_type := ifelse(is_charged_off == TRUE, "Fraud", "Customer")]
-	
-df_fraud <- df[, .(fraud_count = sum(is_fraud), customer_count = sum(is_customer)), 
-	by = inception_month][, 
-	.(fraud_rate = fraud_count/(fraud_count + customer_count)), by = inception_month]
-	
-ggplot(data = df_fraud, aes(x = inception_month, y = fraud_rate)) +
-	geom_bar(stat = "identity", fill = my_colors[1]) +  
-  scale_x_date(limits = c(min_date, max_date),
-    labels = date_format("%b %Y"),
-    date_breaks = "2 month") +
-  scale_y_continuous(limits = c(0,.1)) + 
-  labs(title = "Rate of Fraudulent Account Creation", y = "Number of Fraudulent Accounts/Total Accounts", x = "Account Inception Month") +
-  theme(legend.position="none", axis.text.x = element_text(angle = 45, hjust = 1))
-
-```
-
-```{r, echo = FALSE}
-max_cost <- df_count[which.max(count)]
-```
-
-
-
-
-
-
 
 
 
@@ -897,7 +733,7 @@ print(xtable(df2[!is.na(get(var)), .(mean = round2(mean(get(var), na.rm = TRUE))
 	q50 = round2(quantile(get(var), .50)),
 	q75 = round2(quantile(get(var), .75)),
 	max = round0(max(get(var)))), by = chargeoff_reason], 
-	  floating=TRUE, caption = "Time from account creation to negative balance (Days"), 
+	  floating=TRUE, caption = "Time from account creation to negative balance (Days)"), 
 	include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
 ```
 
@@ -911,7 +747,7 @@ df_days <- df[od_30days_closed == TRUE & terminated == TRUE & is_charged_off == 
  	time_till_closed_median = median(days_to_termination, na.rm=TRUE)), by = chargeoff_reason]
 
 print(xtable(df_days,
-             floating=FALSE, caption = "Time Till Termination Amoung Accounts Labeled For Closure by Radius"),
+             floating=FALSE, caption = "Time till termination amoung accounts labeled for closure by Radius"),
       include.rownames=FALSE, caption.placement = "top")
 
 ```
@@ -1360,6 +1196,7 @@ The average time between an account going negative and any feature being disable
 2. Lock and request docs from users who's initial funding deposit is returned.
 3. Automatically lock accounts after three or more ACH returns, check returns, or ATM chargebacks have drawn the account negative.
 
+```{r, echo = FALSE, eval = FALSE}
 
 # TO DO
 
@@ -1451,7 +1288,7 @@ The average time between an account going negative and any feature being disable
 
 
 
-```{r, echo = FALSE, eval = FALSE}
+
 ```
 
 
