@@ -161,6 +161,7 @@ f.state, f.customer_age, f.days_to_first_summit_debit_card_use, f.first_account_
   f.total_accounts_opened,
   h.termination_date,
   d.balance_date as negative_bal_date,
+d.negative_balance_amount,
   na.balance_date as first_negative_date,
   case when na.user_id is null then 0::boolean else 1::boolean end went_and_stayed_neg,
   case when du.user_id is null then 0::boolean else 1::boolean end disabled_user,
@@ -192,7 +193,7 @@ left join (
     where current_balance < 0
     order by balance_date
   )
-  select depository_id, min(balance_date) - integer '3' as balance_date
+  select depository_id, min(current_balance) as negative_balance_amount, min(balance_date) - integer '3' as balance_date
   from neg_bal
   where max_balance < 0
   group by 1
@@ -211,6 +212,16 @@ and f.first_account_type = 'Summit'
 order by a.user_id;")
 
 df <- data.table(df)
+
+
+df[, neg_after_200_days := ifelse(!is.na(days_to_negative_bal) & days_to_negative_bal > 207, TRUE, FALSE)]
+
+df[, customer_type := ifelse(is_charged_off == TRUE, "Fraud", "Customer")]
+
+df[, no_activity_first_200 := ifelse(total_deposits == 0 | total_withdrawals == 0, 1, 0)]
+
+df[, low_activity_first_200 := ifelse(total_deposits < 3 | total_withdrawals < 3, 1, 0)]
+
 
 ```
 
@@ -609,6 +620,8 @@ group by 1;
 # Note that most of the below code will need to be rewritten to format the data correctly
 df[, ":=" (is_fraud = ifelse(is_charged_off == TRUE, 1, 0),
 	is_customer = ifelse(is_charged_off == FALSE, 1, 0))]
+
+df[, customer_type := ifelse(is_charged_off == TRUE, "Fraud", "Customer")]
 	
 df_fraud <- df[, .(fraud_count = sum(is_fraud), customer_count = sum(is_customer)), 
 	by = inception_month][, 
@@ -648,7 +661,6 @@ max_cost <- df_count[which.max(count)]
 - **Total Loss:** The total amount charge-off amount for an account (hard loss + lost fees).
 - **Hard Loss:** The actual amount of money lost from a charge-off (realized loss).
 - **Lost Fees:** Fees that Aspiration was owed, but never collected (Deposited Item Reversal Fees, Check Reversal Fees, Over Draft Fees, etc.).
-
 
 
 
@@ -693,6 +705,7 @@ As displayed in the tables above, much of the total losses related to NSF Behavi
 
 ```{r, echo=FALSE}
 
+
 df2 <- df[is_charged_off == TRUE]
 
 df3 <- df2[, .(hard_loss = sum(hard_loss_charge_off), lost_fees = sum(fees_charged_off)), 
@@ -700,6 +713,8 @@ df3 <- df2[, .(hard_loss = sum(hard_loss_charge_off), lost_fees = sum(fees_charg
 
 df4 <- melt(df3, id.vars = c("negative_month", "negative_week"),
 	measurment_vars = c("hard_loss", "fees_lost"))
+
+#df4[, variable := factor(variable, levels = c("lost_fees", "hard_loss"))]
 
 p <- ggplot(data = df4,
   aes(negative_month, value, fill=variable)) +
@@ -796,7 +811,7 @@ df2 <- df[is_charged_off == TRUE]
 df3 <- df2[!(chargeoff_reason %in% c("Bank by Mail / In Person",
             "Other", "Opening Dep Chargeback", "Other/Misc")),
            .(hard_loss = sum(hard_loss_charge_off), 
-               lost_fees = sum(fees_charged_off)), 
+               lost_fees = sum(fees_charged_off)),
 	by = .(negative_month, negative_week, chargeoff_reason)]
 
 df4 <- melt(df3, id.vars = c("negative_month", "negative_week", "chargeoff_reason"),
@@ -814,7 +829,7 @@ p <- ggplot(data = df4,
               ncol = 1) +
   labs( x = "Month Accounts Went Negative",
         y = "Charge-off Cost (dollars)",
-        caption = "Note: Bank by Mail / In Person, Opening Dep Chargeback, and Other charge-off reasons remove due to low counts.") #+
+        caption = "Note: Bank by Mail / In Person, Opening Dep Chargeback, and Other charge-off reasons remove due to low counts.") 
     
 p + ggtitle("Fraud Loss by Negative Account Date") +
 	theme(axis.text.x = element_text(angle = 45, hjust = 1),
@@ -998,7 +1013,6 @@ Both Paid Media and Affiliates seem to have a higher rate among fraudulent and c
 
 ## Paid Media
 
-
 ```{r, echo = FALSE}
 
 df[, marketing_type := ifelse(is.na(utm_channel_type), "Unattributed", utm_channel_type)]
@@ -1016,15 +1030,17 @@ hp <- ggplot(m, aes(x= marketing_type, y = rate, fill = customer_type)) +
     labs(title = "Paid Media by Customer Type", caption = "",
          x = "Paid Media Type", y = "Proportion") +
 	theme(axis.text.x = element_text(angle = 45, hjust = 1),
-    	plot.title = element_text(hjust = 0.5), legend.position=c(0.8,0.8))
+    	plot.title = element_text(hjust = 0.5), legend.position=c(0.8,0.8),
+    	legend.title=element_blank())
 
 p1 <- hp + aes(fill = customer_type) + scale_fill_manual(values = my_colors[c(1,3)])
+
+
 ```
 
 The proportion of Search results is higher among fraudulent/charged-off accounts, which could be a result of users seeking out institutions like Aspiration for more malicious behaviors.
 
 ```{r, echo = FALSE, fig.height=7, fig.width=7}
-
 
 df[, marketing_type := ifelse(is.na(utm_channel_type), "Unattributed", utm_channel_type)]
 
@@ -1056,7 +1072,6 @@ grid.arrange(p1, p2, nrow=2)
 # Negative Account Balance Data by Fraud/Risk Group
 
 ```{r, echo = FALSE, eval=FALSE}
-
 
 df[, fraud_label := ifelse(is_charged_off == TRUE, "Fraud",
 		ifelse(went_and_stayed_neg == TRUE, "Stayed Negative",
@@ -1161,29 +1176,25 @@ ggplot(data = df4, aes(fill=fraud_factor, y=N, x=negative_month)) +
 
 ```{r, results = 'asis', echo=FALSE, eval=TRUE}
 
-## Fraud Profiling
+df[, customer_type := ifelse(is_charged_off == TRUE, "Fraud", "Customer")]
 
-# Top states
-#df_states <- df[, .N, by = .(state, is_charged_off)]
-#df_states[, total := sum(N), by = is_charged_off][, rate := round(N/total, 4), by = is_charged_off]
+df2 <- df[neg_after_200_days == TRUE, .(#count = .N,
+	avg_deposits = round2(mean(total_deposits, na.rm=TRUE)),
+	median_deposits = median(total_deposits, na.rm=TRUE),
+	avg_withdrawals = round2(mean(total_withdrawals, na.rm=TRUE)),
+	median_withdrawals = median(total_withdrawals, na.rm=TRUE)), 
+	by = .(customer_type)]
 
-#print(xtable(df_states[order(-rate)][1:10], floating=TRUE, caption = "High Frequency Customer States"), #include.rownames=TRUE, scalebox='0.90', caption.placement = "top")
-
-# Customer age
-#print(xtable(df[, .(mean_customer_age = round(mean(customer_age),2),
-#       median_customer_age = median(customer_age)), by = .(is_charged_off)], floating=TRUE, caption = "Customer Age #(Years)"), include.rownames=TRUE, scalebox='0.90', caption.placement = "top")
-
-# days to first summit debit card use
-df_debit <- df[, .(mean_days_till_first_debit = round(mean(days_to_first_summit_debit_card_use, na.rm= TRUE),2), 
-	median_days_till_first_debit = median(days_to_first_summit_debit_card_use, na.rm=TRUE)), by = .(is_charged_off)]
-
-print(xtable(df_debit, floating=TRUE, caption = "Days to First Debit Card Usage"), include.rownames=TRUE, scalebox='0.90', caption.placement = "top")
+print(xtable(df2, floating=TRUE, caption = "Account Usage"),
+      include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
 
 # Inital funding
-df_fund <- df[, .(mean_initial_funding_amount = round(mean(first_account_funding_amount, na.rm= TRUE),2), 
-	median_initial_funding_amount = median(first_account_funding_amount, na.rm=TRUE)), by = .(is_charged_off)]
+#df_fund <- df[, .(mean_initial_funding_amount = 
+#                    round(mean(first_account_funding_amount, na.rm= TRUE),2), 
+#	median_initial_funding_amount = median(first_account_funding_amount, na.rm=TRUE)), 
+#	  by = .(customer_type)]
 
-print(xtable(df_fund, floating=TRUE, caption = "Initial Funding"), include.rownames=TRUE, scalebox='0.90', caption.placement = "top")
+#print(xtable(df_fund, floating=TRUE, caption = "Initial Funding"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
 
 ```
 
@@ -1203,22 +1214,22 @@ From anecdotal experience, some FinTechs saw a large spike in scripted 3rd Party
 
 ```
 
-## Users who went negative after 200 + days
-
-Comparing deposite counts and withdrawals among users who first went negative after 200 days, those who stayed negative, and those who did not.
+Comparing deposite counts and withdrawals between customers and fraudsters among users who first went negative after 200 days, those who stayed negative, and those who did not.
 
 ```{r, echo = FALSE, results = 'asis'}
 
 df[, neg_after_200_days := ifelse(!is.na(days_to_negative_bal) & days_to_negative_bal > 207, TRUE, FALSE)]
 
-df2 <- df[, .(#count = .N,
-	avg_deposits = mean(total_deposits, na.rm=TRUE),
-	median_deposits = median(total_deposits, na.rm=TRUE),
-	avg_withdrawals = mean(total_withdrawals, na.rm=TRUE),
-	median_withdrawals = median(total_withdrawals, na.rm=TRUE)), 
-	by = .(went_and_stayed_neg, neg_after_200_days)][order(went_and_stayed_neg, neg_after_200_days)]
+df[, customer_type := ifelse(is_charged_off == TRUE, "Fraud", "Customer")]
 
-print(xtable(df2, floating=TRUE, caption = "Account activity during first 200 days"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
+df2 <- df[neg_after_200_days == TRUE, .(#count = .N,
+	avg_deposits = round2(mean(total_deposits, na.rm=TRUE)),
+	median_deposits = median(total_deposits, na.rm=TRUE),
+	avg_withdrawals = round2(mean(total_withdrawals, na.rm=TRUE)),
+	median_withdrawals = median(total_withdrawals, na.rm=TRUE)), 
+	by = .(customer_type)]
+
+print(xtable(df2, floating=FALSE, caption = "Account activity during first 200 days among accounts that went negative after 200 days"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
 
 ```
 
@@ -1226,12 +1237,55 @@ print(xtable(df2, floating=TRUE, caption = "Account activity during first 200 da
 
 ```{r, echo = FALSE, results = 'asis'}
 
-df2 <- df[, .N, by = .(is_charged_off, browser_name)][, head(.SD, 5), by = is_charged_off][
-  order(is_charged_off, -N)]
+df[, customer_type := ifelse(is_charged_off == TRUE, "Fraud", "Customer")]
+## States
+var <- "state"
+top_5 <- df[, .N, by = .(get(var))][order(-N)][1:10]
+top_5_groups <- df[get(var) %in% top_5[, get]][, .N, by = .(customer_type, get(var))]
+top_5_groups_wide <- dcast(top_5_groups, get ~ customer_type, value.var = "N")
+top_5_groups_wide <- merge(top_5, top_5_groups_wide, by.x = "get", by.y = "get", all.x=TRUE)
+colnames(top_5_groups_wide)[colnames(top_5_groups_wide)=="get"] <- var
+top_5_groups_wide[, ':=' (Customer = percent_round2(Customer/N),
+	Fraud = percent_round2(Fraud/N))]
 
-print(xtable(df2, floating=TRUE, caption = "Top 5 browsers between fraud and non-fraud"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
+print(xtable(top_5_groups_wide[order(-N)], floating=FALSE, caption = "Top 10 States"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
+```
+
+
+```{r, echo = FALSE, results = 'asis'}
+## email domain
+var <- "email_domain"
+top_5 <- df[, .N, by = .(get(var))][order(-N)][1:10]
+top_5_groups <- df[get(var) %in% top_5[, get]][, .N, by = .(customer_type, get(var))]
+top_5_groups_wide <- dcast(top_5_groups, get ~ customer_type, value.var = "N")
+top_5_groups_wide <- merge(top_5, top_5_groups_wide, by.x = "get", by.y = "get", all.x=TRUE)
+colnames(top_5_groups_wide)[colnames(top_5_groups_wide)=="get"] <- var
+top_5_groups_wide[, ':=' (Customer = percent_round2(Customer/N),
+	Fraud = percent_round2(Fraud/N))]
+
+print(xtable(top_5_groups_wide[order(-N)], floating=FALSE, caption = "Top 10 Email Domains"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
 
 ```
+
+
+
+
+```{r, echo=FALSE, results = 'asis'}
+
+## browser_name
+var <- "browser_name"
+top_5 <- df[browser_name != "NA", .N, by = .(get(var))][order(-N)][1:8]
+top_5_groups <- df[get(var) %in% top_5[, get]][, .N, by = .(customer_type, get(var))]
+top_5_groups_wide <- dcast(top_5_groups, get ~ customer_type, value.var = "N")
+top_5_groups_wide <- merge(top_5, top_5_groups_wide, by.x = "get", by.y = "get", all.x=TRUE)
+colnames(top_5_groups_wide)[colnames(top_5_groups_wide)=="get"] <- var
+top_5_groups_wide[, ':=' (Customer = percent_round2(Customer/N),
+	Fraud = percent_round2(Fraud/N))]
+
+print(xtable(top_5_groups_wide[order(-N)], floating=FALSE, caption = "Top 8 Web Browsers (note: there are only 8 in database"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
+
+```
+
 
 
 ```{r, echo = FALSE, results = 'asis'}
@@ -1239,19 +1293,10 @@ print(xtable(df2, floating=TRUE, caption = "Top 5 browsers between fraud and non
 df2 <- df[, .N, by = .(is_charged_off, state)][, head(.SD, 5), by = is_charged_off][
   order(is_charged_off, -N)]
 
-print(xtable(df2, floating=TRUE, caption = "Top 5 states between fraud and non-fraud"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
+print(xtable(df2, floating=FALSE, caption = "Top 5 states between fraud and non-fraud"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
 
 ```
 
-
-```{r, echo = FALSE, results = 'asis'}
-
-df2 <- df[, .N, by = .(is_charged_off, email_domain)][, head(.SD, 5), by = is_charged_off][
-  order(is_charged_off, -N)]
-
-print(xtable(df2, floating=TRUE, caption = "Top 5 email domains between fraud and non-fraud"), include.rownames=FALSE, scalebox='0.90', caption.placement = "top")
-
-```
 
 
 ## Example of a user who continued to commit fraud after going negative the first time
@@ -1265,16 +1310,55 @@ User with email `pbou11@yahoo.com`, overdrafted their account by around $3K due 
 
 External Transaction Chargebacks make up the majority of realized money loss and should be addressed first in reducing overall fraud loss, while NSF Behavior has the largest volume of charge-offs, the amount of realized loss is one of the smallest costs.
 
+Currently, the loss from External Transaction Chargebacks is due to provisionally crediting an account before the funds transfer which will end after migration. While this will prevent most of the money lost from External Transaction Chargebacks, it will have a negative impact on customer experience. This could be mitigated by partnering with Plaid ID and provisionally credit accounts that verify both ownership and account balance of the linked account.
+
+### Steps
+
+1. Partner with Data Team to create reports to assess potential fraud/high-risk activity for Banking Operations to review daily (i.e., pull list of high volumne ACH transfers, users who have a high number of ACH or check returns, ...).
+2. Verify account ownership when linking new accounts (Plaid) and request documentation if user does not appear to own the account they are attempting to link.
+3. Verify account balance of linked Plaid accounts at time of tranfser.
+4. Use history non-Aspiration Plaid banking data to identify potential high-risk fraudsters for manual review.
+
+
 ## Data Quality
 
-Thus far, much, if not all, of the fraud reporting and labeling has been dictated by Radius. Numerous accounts have been found that display fraudulent behaviors, but have not been reported as fraudulent by Radius or have even been mislabeled (i.e., NSF Behavior when in fact account is displaying External Transaction Charge backs). Review of such accounts as well as the continued work in the Ops department to take control over the process and procedures around mitigation of risk and fraud, including labeling, will improve the ability to monitor and model fraud.
+Thus far, much, if not all, of the fraud reporting and labeling has been dictated by Radius. Numerous accounts have been found that display fraudulent behaviors, but have not been reported as fraudulent by Radius or have been mislabeled (i.e., NSF Behavior when in fact account is displaying External Transaction Charge backs). Review of such accounts as well as the continued work by the Banking Operations department to take control over the process and procedures around mitigation of risk and fraud (including labeling) will improve the ability to monitor and model fraud.
 
-Furthermore, Radius has not passed on information regarding 1st or 3rd party fraud verses synthetic fraud. Since these groups tend to have very different qualities, it would be wise to differentiate between them going forward, so as best to target the different types of fraud while optimizing the customer experience for good customers.
+Banking Operations has begun to label fradulent accounts with the following tags in Zendesk:
+
+* Suspected ID theft
+* Confirmed ID theft
+* New account fraud
+* ACH fraud
+* Check fraud
+* Card fraud
+* Reg E fraud
+* Wire fraud
+* Fraud loss
+* ATO
+* Compromised account
+* Scam
+* Account abuse
+* Tax fraud
+* Elder abuse
+
+### Steps
+
+1. Continue with the new fraud labeling in Zendesk, but explore ways to implement labeling in the database to better detect and report fraud.
+2. Create definitions/rules around fraud labeling that can be implemented in the database for reporting and early detection (i.e., behaviors such as depositing a check and spending the money prior to the check being returned counld be tracked in the database with improvements in the data).
+3. Create rules/patterns for identifying the above labels that can be applied to historic data and labeled as '[fill in label] - Warning' (i.e., ACH Fraud - Warning, ATO - Warning). 
+4. Record check numbers from deposited and returned checks in order to link them up for modeling purposes.
 
 
-## Time to Account Termination/Disabling
+## Account Lock and Termination
 
 The average time between an account going negative and any feature being disable ranges from 30 to 74 days. While radius has a standard of charging off accounts after 30 days of being over drafted, the data shows that they have not always stuck to their deadline, even when it comes to disabling features.
+
+### Steps
+
+1. Automatatically shut down accounts after they have been in overdraft for more than 30 days.
+2. Lock and request docs from users who's initial funding deposit is returned.
+3. Automatically lock accounts after three or more ACH returns, check returns, or ATM chargebacks have drawn the account negative.
 
 
 # TO DO
@@ -1344,38 +1428,31 @@ The average time between an account going negative and any feature being disable
 
 - **Look at edge cases, give some qualitative insight**
   
-- ~~**Why do some people wait so long? After 200 days - compare customers who regularly engage account who then commit fraud. Is it sleeper accounts?**~~ This needs more evaluation using a better metric
+- ~~**Why do some people wait so long? After 200 days - compare customers who regularly engage account who then commit fraud. Is it sleeper accounts?**~~ \
 
 - **Bring back more purposals of processes we are trying to change** (before meeting with Ops team)
 
-- ~~**Bring back examples of people committing fraud between being going nedagive and being diabled**~~ Added 1 user, but need to figure out way to quantify it (need to link up users who went negative, and had an additional return of some kind, how to do this since Radius does not give timestamps back with transactino data, i.e., not sure of the actual order of transactions)
+- ~~**Bring back examples of people committing fraud between being going nedagive and being diabled**~~ ~~Added 1 user, but need to figure out way to quantify it (need to link up users who went negative, and had an additional return of some kind, how to do this since Radius does not give timestamps back with transactino data, i.e., not sure of the actual order of transactions)~~
 
-- **Purpose hard cuttoff for disabling accounts (example if they go negative once, we forgive, but twice we disable - purposal section)** - dependent on the above
+- ~~**Purpose hard cuttoff for disabling accounts (example if they go negative once, we forgive, but twice we disable - purposal section)**~~ - ~~dependent on the above~~
   
-- **Why is ATM Severity higher the highest severity**
+- ~~**Why is ATM Severity higher the highest severity**~~ May be easier to do dual check presentment since mobile deposit forces you to write "For Mobile Deposit Only" on it
+
+## Follow ups from Ravi
+
+- ~~**what are you trying to say re: table 11 (sleeper accoutns). Compare fraud after 200 days to non-dfraud after 200 days. Look at percentage of those that have zero**~~ - 39% of customers had no activity for first 200 days compared to 16% of fraudsters who had no activity. If looking at low activity (3 or less deposits or withdrawals) it was 65% vs 35%
+
+- ~~**ask brandon or someone who is unknown browser**~~ - waiting to hear back from Brandon. Anthony thinks something might not be getting parsed right.
+
+- ~~**Add comment about timestamps and transaction data about not being real time and how it could help with the recommendations and rules**~~
+
+- ~~**look at by percentage of fraud, same for browser, same for states, email domain**~~
+
+
+
 
 ```{r, echo = FALSE, eval = FALSE}
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
